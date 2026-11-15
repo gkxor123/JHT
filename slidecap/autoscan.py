@@ -21,7 +21,7 @@ Rules
 import os
 import re
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v", ".flv", ".ts",
@@ -77,7 +77,35 @@ def _score(video_tokens: set, doc_tokens: set) -> float:
     return hit / float(len(video_tokens))
 
 
-def matched_videos(course: str) -> Dict[str, str]:
+def load_handout_log(path: Optional[str], root: str) -> Dict[str, List[str]]:
+    """Lecture notes known from 01_Radiology (handout_seen.json, a list of
+    "<sub>/<course>/<file>", or lecture_copy_log.json, keys "...|<target>").  Returns
+    {course folder: [virtual paths of the notes]} so a course keeps counting as
+    "has notes" even after its original notes were deleted."""
+    if not path or not os.path.isfile(path):
+        return {}
+    import json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            log = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for key in log:              # dict (copy log) or list (handout_seen.json)
+        rel = key.split("|")[0]
+        parts = rel.split("/")
+        if len(parts) < 3:
+            continue
+        name = parts[-1]
+        stem, ext = os.path.splitext(name)
+        if ext.lower() not in HANDOUT_EXTS or is_not_handout_name(stem):
+            continue
+        course = os.path.normcase(os.path.abspath(os.path.join(root, parts[0], parts[1])))
+        out.setdefault(course, []).append(os.path.join(root, *parts))
+    return out
+
+
+def matched_videos(course: str, extra_docs: Sequence[str] = ()) -> Dict[str, str]:
     """Videos of a course that already have their own lecture note.
 
     Returns {video path: matching document path}.  A video and a document
@@ -95,6 +123,7 @@ def matched_videos(course: str) -> Dict[str, str]:
               and not (os.path.splitext(f)[1].lower() in (".pptx", ".ppt") and os.path.splitext(f)[0].lower() in stems)]
         vids += dv
         docs += dd
+    docs += [x for x in extra_docs if x not in docs]
     out: Dict[str, str] = {}
     by_dir: Dict[str, List[str]] = {}
     for v in vids:
@@ -159,8 +188,12 @@ def has_output(video: str) -> bool:
     return os.path.exists(os.path.splitext(os.path.abspath(video))[0] + ".pptx")
 
 
-def scan(root: str, depth: int = DEFAULT_COURSE_DEPTH):
-    """Return (videos_to_convert, skipped_courses {course: handout path})."""
+def scan(root: str, depth: int = DEFAULT_COURSE_DEPTH, handout_log: Optional[str] = None):
+    """Return (videos_to_convert, skipped_courses {course: handout path}).
+
+    handout_log: optional lecture_copy_log.json; notes listed there count
+    even when the original files were deleted from the course folder."""
+    logged = load_handout_log(handout_log, root)
     todo: List[str] = []
     skipped: Dict[str, str] = {}
     checked: Dict[str, Optional[str]] = {}
@@ -175,11 +208,12 @@ def scan(root: str, depth: int = DEFAULT_COURSE_DEPTH):
                 continue
             c = course_folder(v, root, depth)
             if c not in checked:
+                extra = logged.get(os.path.normcase(os.path.abspath(c)), [])
                 if has_force_marker(c):
                     checked[c] = None
-                    covered[c] = matched_videos(c)
+                    covered[c] = matched_videos(c, extra)
                 else:
-                    checked[c] = has_handout(c)
+                    checked[c] = has_handout(c) or (extra[0] if extra else None)
                     if checked[c]:
                         skipped[c] = checked[c]
             if checked[c]:

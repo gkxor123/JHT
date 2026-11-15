@@ -59,6 +59,17 @@ def main():
         want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5, new6, new7, new8))
         assert sorted(todo) == want, (todo, want)
         assert len(skipped) == 2, skipped
+    # notes deleted from the course folder but known from the 01_Radiology list
+    import json
+    with tempfile.TemporaryDirectory() as root:
+        v = touch(root, "05_Neuro/2023-09-10 강좌G/session 1.mp4")
+        new9 = touch(root, "05_Neuro/2024-01-01 강좌H/session 1.mp4")
+        lst = os.path.join(root, "seen.json")
+        with open(lst, "w", encoding="utf-8") as fh:
+            json.dump(["05_Neuro/2023-09-10 강좌G/강의록.pdf", "05_Neuro/2024-01-01 강좌H/2024 프로그램.pdf"], fh)
+        todo, skipped = scan(root, handout_log=lst)
+        assert todo == [os.path.abspath(new9)], todo
+        assert len(skipped) == 1, skipped
     print("autoscan tests passed")
 
     real = os.environ.get("SLIDECAP_REAL_ROOT")

@@ -384,10 +384,11 @@ def has_output(video: str) -> bool:
 # --------------------------------------------------------------------------
 
 class App(_BaseTk):
-    def __init__(self, initial_paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH):
+    def __init__(self, initial_paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH, handout_log=None):
         super().__init__()
         self.auto = auto
         self.course_depth = course_depth
+        self.handout_log = handout_log
         self.title(APP_TITLE)
         try:
             self.iconbitmap(default=_resource("icon.ico"))
@@ -515,7 +516,7 @@ class App(_BaseTk):
             if not p:
                 continue
             if os.path.isdir(p) and self.auto:
-                vids, skipped = auto_scan(p, self.course_depth)
+                vids, skipped = auto_scan(p, self.course_depth, self.handout_log)
                 for c, h in sorted(skipped.items()):
                     self._log("강의록 있음, 건너뜀: %s (%s)" % (os.path.relpath(c, p), os.path.basename(h)))
                 if skipped:
@@ -884,7 +885,7 @@ def _write_error_log(text):
         pass
 
 
-def run(paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH):
+def run(paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH, handout_log=None):
     _set_dpi_awareness()
-    app = App(paths, auto=auto, course_depth=course_depth)
+    app = App(paths, auto=auto, course_depth=course_depth, handout_log=handout_log)
     app.mainloop()

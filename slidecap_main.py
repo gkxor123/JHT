@@ -92,14 +92,16 @@ def main():
     from slidecap.gui import run
     if argv and argv[0] == "--auto":
         from slidecap.autoscan import DEFAULT_COURSE_DEPTH
-        depth, paths, rest = DEFAULT_COURSE_DEPTH, [], argv[1:]
+        depth, paths, rest, hlog = DEFAULT_COURSE_DEPTH, [], argv[1:], None
         while rest:
             a = rest.pop(0)
             if a == "--course-depth" and rest:
                 depth = int(rest.pop(0))
+            elif a == "--handout-log" and rest:
+                hlog = rest.pop(0)
             else:
                 paths.append(a)
-        run(paths, auto=True, course_depth=depth)
+        run(paths, auto=True, course_depth=depth, handout_log=hlog)
     else:
         run(argv)
 

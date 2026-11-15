@@ -48,6 +48,12 @@ def main():
     cv2.circle(figure, (1020, 370), 90, (200, 200, 200), -1)
     foot = base.copy()
     cv2.putText(foot, "Ref: Radiology 2024;310:e1234", (60, 690), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2)
+    mri = base.copy()   # dark picture near the bottom, caption below it
+    cv2.rectangle(mri, (420, 470), (760, 670), (25, 25, 25), -1)
+    cv2.ellipse(mri, (590, 570), (120, 70), 0, 0, 360, (150, 150, 150), -1)
+    cv2.putText(mri, "Radiographics 2023;43(2):359-378", (420, 705), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2)
+    mri2 = mri.copy()   # arrowhead added inside the picture
+    cv2.fillPoly(mri2, [np.array([[700, 640], [730, 610], [745, 650]], np.int32)], (255, 255, 255))
     dark = slide(dark=True)
     dark2 = dark.copy()
     cv2.putText(dark2, "answer", (470, 700), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (230, 230, 230), 3)
@@ -59,6 +65,7 @@ def main():
         ("new figure + toast", base, toast(figure, "x"), ("!pointer", None)),
         ("footnote added", base, foot, ("addition", None)),
         ("dark slide, text at bottom", dark, dark2, ("!pointer", None)),
+        ("arrow in picture at bottom", mri, mri2, ("!pointer", None)),
     ]
     bad = 0
     for name, p, c, (want, keep) in cases:

@@ -767,7 +767,7 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     xa, xb = max(0, x - pad), min(W, x + w + pad)
     top, lim = y, int(H * 0.6)
     while top > lim and max(float((sa[top - 1, xa:xb] < 70).mean()),
-                            float((sb[top - 1, xa:xb] < 70).mean())) > 0.35:
+                            float((sb[top - 1, xa:xb] < 70).mean())) > 0.15:
         top -= 1
     if top <= lim:
         return None
@@ -780,6 +780,12 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     above_b = float((sb[t:top, xa:xb] < 70).mean())
     if max(above_a, above_b) > 0.25:
         return None
+    # the box reaches the bottom edge (a dark picture on the slide usually
+    # has a light margin or caption below it)
+    s = sa if da >= db else sb
+    for r in range(y + h, int(H * 0.97)):
+        if float((s[r, xa:xb] < 70).mean()) <= 0.15:
+            return None
     return da, db
 
 

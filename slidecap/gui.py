@@ -460,6 +460,7 @@ class App(_BaseTk):
         opt = ttk.LabelFrame(self, text="옵션", padding=8)
         opt.pack(fill="x", **pad)
         self.same_region = tk.BooleanVar(value=True)
+        self.auto_region = tk.BooleanVar(value=True)
         self.save_images = tk.BooleanVar(value=False)
         self.dedupe = tk.BooleanVar(value=True)
         self.collapse = tk.BooleanVar(value=True)
@@ -471,6 +472,9 @@ class App(_BaseTk):
         r1 = ttk.Frame(opt); r1.pack(fill="x")
         ttk.Checkbutton(r1, text="여러 영상에 첫 영상의 영역을 똑같이 적용 (같은 강좌 시리즈일 때)",
                         variable=self.same_region).pack(side="left")
+        r1b = ttk.Frame(opt); r1b.pack(fill="x")
+        ttk.Checkbutton(r1b, text="PPT 영역 자동 인식 (확실하면 바로 진행, 애매할 때만 찾은 영역을 보여 주고 확인)",
+                        variable=self.auto_region).pack(side="left")
         r2 = ttk.Frame(opt); r2.pack(fill="x", pady=(4, 0))
         ttk.Label(r2, text="민감도:").pack(side="left")
         for txt, val in (("보통 (권장)", "normal"), ("높음 - 작은 변화도 캡처", "high"), ("낮음 - 큰 변화만", "low")):
@@ -714,6 +718,24 @@ class App(_BaseTk):
                     self.unsure_dirs.append(os.path.dirname(p))
                     self._log("영역 자동 인식(넉넉하게 잡음, 나중에 slidecap_region.jpg 확인): %s (%s)"
                               % (os.path.basename(p), why))
+            if r is None and not self.auto and info is not None and self.auto_region.get():
+                # opened by hand: use the found area when sure, otherwise ask
+                # with the found area already drawn (just press Enter if right)
+                try:
+                    from .autoregion import auto_region_for_video
+                    self._set_row(p, status="영역 자동 인식 중")
+                    self.status.config(text="영역 자동 인식 중: %s" % os.path.basename(p))
+                    self.update()
+                    roi, sure, why, _prev = auto_region_for_video(p)
+                except Exception as e:
+                    roi, sure, why = None, False, str(e)
+                if roi is not None and sure:
+                    r = (tuple(roi), [])
+                    save_region(p, info, r)
+                    self._log("영역 자동 인식: %s %s" % (os.path.basename(p), self._region_text(r)))
+                elif roi is not None:
+                    saved = (tuple(roi), [])
+                    self._log("영역이 애매해서 확인을 부탁드립니다 (찾은 영역을 그려 둠): %s" % os.path.basename(p))
             if r is None:
                 r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:

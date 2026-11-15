@@ -30,9 +30,18 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
-          python tests/test_engine.py
-          python tests/test_autoscan.py
-          python tests/test_overlay.py
+          $fail = 0
+          foreach ($t in "tests/test_autoscan.py", "tests/test_overlay.py", "tests/test_engine.py") {
+            $out = & python $t 2>&1 | ForEach-Object { "$_" }
+            $out
+            if ($LASTEXITCODE -ne 0) {
+              $fail = 1
+              # failure details as a public annotation (job logs need sign-in)
+              $msg = (($out | Select-Object -Last 40) -join "%0A") -replace "::", ": :"
+              Write-Output "::error title=$t::$msg"
+            }
+          }
+          if ($fail) { exit 1 }
 
       - name: Build exe
         run: pyinstaller --noconfirm SlideCap.spec

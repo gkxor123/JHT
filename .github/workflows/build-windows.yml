@@ -32,6 +32,7 @@ jobs:
           $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
           python tests/test_engine.py
           python tests/test_autoscan.py
+          python tests/test_overlay.py
 
       - name: Build exe
         run: pyinstaller --noconfirm SlideCap.spec

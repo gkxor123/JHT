@@ -670,16 +670,22 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
     """How does capture ``c`` differ from the previous capture ``p``?
 
     Returns (kind, keep_c) where kind is
-      "pointer"  - only cursor-sized spots differ (pointer appeared/vanished)
+      "pointer"  - only cursor-sized spots differ (pointer appeared/vanished),
+                   or a meeting-app overlay (chat notification box at the
+                   bottom edge) appeared/vanished
       "addition" - content was added onto empty background (bullet, text,
                    figure building up); nothing that was there changed
       "different"- anything else (new slide, image replaced, ...)
-    keep_c tells, for "pointer", which version is cleaner (fewer edges).
+    keep_c tells, for "pointer", which version is cleaner (fewer edges,
+    or without the overlay box).
     """
     # ignore only moving content present in both (e.g. the same GIF)
     excl = np.zeros_like(p.small)
     if p.dyn is not None and c.dyn is not None:
         excl = p.dyn & c.dyn
+    dyn_any = None   # moving content seen in either capture
+    if p.dyn is not None or c.dyn is not None:
+        dyn_any = (p.dyn if p.dyn is not None else 0) | (c.dyn if c.dyn is not None else 0)
     m = a.diff(p.small, c.small) & (1 - excl)
     if not m.any():
         return "pointer", False
@@ -696,6 +702,7 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
     grays = None
     kinds = []
     edge_a = edge_b = 0
+    dark_a = dark_b = 0.0
     for i in range(1, n):
         x, y, w, h, area = stats[i]
         if area < a.tiny_blob:
@@ -709,6 +716,11 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
         # changed pixels that were plain background before / are now
         on_bg_a = float(bg_a[y:y + h, x:x + w][mreg].mean()) if mreg.any() else 0.0
         on_bg_b = float(bg_b[y:y + h, x:x + w][mreg].mean()) if mreg.any() else 0.0
+        ov = _overlay_box(p.small, c.small, a, x, y, w, h)
+        if ov is not None:
+            kinds.append("overlay")
+            dark_a += ov[0]; dark_b += ov[1]
+            continue
         small = w <= pw * 1.6 and h <= ph * 1.6 and area <= pa * 2.0
         if small and grays is None:
             grays = [cv2.cvtColor(p.image, cv2.COLOR_BGR2GRAY), cv2.cvtColor(c.image, cv2.COLOR_BGR2GRAY)]
@@ -717,13 +729,45 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
             edge_a += fa * area; edge_b += fb * area
         elif on_bg_a > 0.85 and on_bg_b < 0.7:
             kinds.append("addition")   # drawn onto empty background
+        elif dyn_any is not None and float(dyn_any[y:y + h, x:x + w][mreg].mean()) > 0.8:
+            kinds.append("moving")     # GIF seen moving in one capture only
         else:
             kinds.append("other")
+    if "overlay" in kinds and all(k in ("pointer", "overlay", "moving") for k in kinds):
+        return "pointer", dark_b < dark_a
+    kinds = ["other" if k == "moving" else k for k in kinds]  # unchanged rule without an overlay
     if not kinds or all(k == "pointer" for k in kinds):
         return "pointer", edge_b < edge_a
     if "other" not in kinds:
         return "addition", True
     return "different", True
+
+
+def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
+    """Is the changed box x,y,w,h a notification box of the meeting app
+    (e.g. Zoom chat "... to everyone") that is shown in only one capture?
+
+    It sits at the bottom edge, is small, and is a dark filled box in one
+    capture and not in the other.  Returns (dark_a, dark_b) or None."""
+    W, H = a.ww, a.wh
+    if not (y >= H * 0.7 and y + h >= H * 0.9 and w <= W * 0.35 and h <= H * 0.22):
+        return None
+    ra = sa[y:y + h, x:x + w]
+    rb = sb[y:y + h, x:x + w]
+    da = float((ra < 70).mean())
+    db = float((rb < 70).mean())
+    if max(da, db) < 0.45:
+        return None
+    # the box must be a dark island on a light slide: the strip just above
+    # it is light in both captures (rules out dark-themed slides)
+    t = max(0, y - max(4, h // 4))
+    if t >= y:
+        return None
+    above_a = float((sa[t:y, x:x + w] < 70).mean())
+    above_b = float((sb[t:y, x:x + w] < 70).mean())
+    if max(above_a, above_b) > 0.25:
+        return None
+    return da, db
 
 
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,

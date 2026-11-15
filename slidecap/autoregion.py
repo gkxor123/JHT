@@ -21,64 +21,51 @@ import numpy as np
 Rect = Tuple[int, int, int, int]
 
 DIFF = 25            # gray-level difference counted as change
-SOMETIMES = (0.02, 0.6)   # share of sample pairs with change: slide content
-ALWAYS = 0.6         # changing in more pairs than this: webcam / video
 
 
-def _runs(flags: np.ndarray):
-    """Contiguous True runs as (start, end) with end exclusive."""
-    out, start = [], None
-    for i, f in enumerate(list(flags) + [False]):
-        if f and start is None:
-            start = i
-        elif not f and start is not None:
-            out.append((start, i))
-            start = None
-    return out
+def _quantile_span(profile: np.ndarray, q: float) -> Tuple[int, int]:
+    """Span holding all but q of the profile's mass on each side."""
+    c = np.cumsum(profile) / max(1e-9, float(profile.sum()))
+    a = int(np.searchsorted(c, q))
+    b = int(np.searchsorted(c, 1.0 - q)) + 1
+    return a, max(a + 1, b)
 
 
-def _span(profile: np.ndarray, thresh: float, gap: int) -> Optional[Tuple[int, int]]:
-    """Longest run of profile > thresh, bridging holes up to ``gap``."""
-    flags = profile > thresh
-    runs = _runs(flags)
-    if not runs:
-        return None
-    merged = [list(runs[0])]
-    for a, b in runs[1:]:
-        if a - merged[-1][1] <= gap:
-            merged[-1][1] = b
-        else:
-            merged.append([a, b])
-    a, b = max(merged, key=lambda r: (r[1] - r[0]) * profile[r[0]:r[1]].sum())
-    return a, b
+def _grow(med: np.ndarray, x0: int, y0: int, x1: int, y1: int):
+    """Grow the box over plain slide background (same tone as the slide) until a
+    clearly different area (screen border, dark surroundings) or the frame edge.
 
+    Returns the box and how many of its 4 sides ended on a clear border or the
+    frame edge (rather than on something vague)."""
+    H, W = med.shape
+    m = med.astype(np.int16)
+    vals = m[y0:y1, x0:x1].ravel()
+    hist = np.bincount(np.clip(vals, 0, 255), minlength=256)
+    bg = int(np.argmax(np.convolve(hist, np.ones(9), "same")))   # slide background tone
 
-def _snap(median: np.ndarray, a: int, b: int, axis: int, reach: int) -> Tuple[int, int]:
-    """Move the span ends to the strongest straight edge within ``reach``.
+    def plain(seg):          # mostly slide background (text/figures allowed)
+        return float((np.abs(seg - bg) <= 20).mean()) >= 0.6
 
-    axis=1: a/b are columns (vertical edges); axis=0: rows."""
-    g = median.astype(np.float32)
-    if axis == 1:
-        d = np.abs(np.diff(g, axis=1)).mean(axis=0)     # per column boundary
-    else:
-        d = np.abs(np.diff(g, axis=0)).mean(axis=1)     # per row boundary
-    n = len(d) + 1
+    def border(seg):         # a solid area clearly unlike the slide
+        return float((np.abs(seg - bg) > 40).mean()) >= 0.7
 
-    def best(p, lo, hi):
-        lo, hi = max(0, lo), min(len(d), hi)
-        if hi <= lo:
-            return p
-        seg = d[lo:hi]
-        k = int(np.argmax(seg))
-        # only a clear line (much stronger than its surroundings) counts
-        if seg[k] > max(12.0, 3.0 * float(np.median(d))):
-            return lo + k + 1
-        return p
-    a2 = best(a, a - reach, a + reach)
-    b2 = best(b, b - reach, b + reach)
-    if b2 - a2 < (b - a) * 0.7:
-        return a, b
-    return max(0, a2), min(n, b2)
+    sides = {}
+    for _ in range(2):
+        while x0 > 0 and plain(m[y0:y1, x0 - 1]):
+            x0 -= 1
+        while x1 < W and plain(m[y0:y1, x1]):
+            x1 += 1
+        while y0 > 0 and plain(m[y0 - 1, x0:x1]):
+            y0 -= 1
+        while y1 < H and plain(m[y1, x0:x1]):
+            y1 += 1
+    # look a few pixels beyond the box: a thin frame line may sit right at it
+    k, s = 3, max(2, W // 160)
+    sides["l"] = x0 <= 1 or any(border(m[y0:y1, max(0, x0 - o - k):x0 - o]) for o in (0, s) if x0 - o > 0)
+    sides["r"] = x1 >= W - 1 or any(border(m[y0:y1, x1 + o:x1 + o + k]) for o in (0, s) if x1 + o < W)
+    sides["t"] = y0 <= 1 or any(border(m[max(0, y0 - o - k):y0 - o, x0:x1]) for o in (0, s) if y0 - o > 0)
+    sides["b"] = y1 >= H - 1 or any(border(m[y1 + o:y1 + o + k, x0:x1]) for o in (0, s) if y1 + o < H)
+    return x0, y0, x1, y1, sum(sides.values())
 
 
 def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, str]:
@@ -88,33 +75,28 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
     st = np.stack([f.astype(np.int16) for f in frames])
     H, W = st.shape[1:]
     ch = (np.abs(np.diff(st, axis=0)) > DIFF).mean(axis=0)   # share of pairs with change
-    content = (ch > SOMETIMES[0]) & (ch < SOMETIMES[1])
-    always = ch >= ALWAYS
-    if content.mean() < 0.02:
+    if ch.mean() < 0.005:
         return None, "low", "almost nothing changes"
-    gap = max(3, W // 40)
-    xs = _span(content.mean(axis=0), 0.03, gap)
-    ys = _span(content.mean(axis=1), 0.03, gap)
-    if xs is None or ys is None:
-        return None, "low", "no changing area"
-    x0, x1 = xs
-    y0, y1 = ys
+    # core of the changes (a moving webcam or toolbar is trimmed off) ...
+    x0, x1 = _quantile_span(ch.sum(axis=0), 0.03)
+    y0, y1 = _quantile_span(ch.sum(axis=1), 0.03)
+    # ... grown over the blank parts of the slide up to its border
     med = np.median(st, axis=0).astype(np.uint8)
-    reach = max(4, W // 30)
-    x0, x1 = _snap(med[y0:y1], x0, x1, 1, reach)
-    y0, y1 = _snap(med[:, x0:x1], y0, y1, 0, reach)
+    x0, y0, x1, y1, sides = _grow(med, x0, y0, x1, y1)
     w, h = x1 - x0, y1 - y0
     roi = (int(x0), int(y0), int(w), int(h))
     area = w * h / float(W * H)
     aspect = w / float(max(1, h))
-    inside_always = float(always[y0:y1, x0:x1].mean())
+    inside = float(ch[y0:y1, x0:x1].sum() / ch.sum())
     reasons = []
-    if area < 0.2:
+    if area < 0.15:
         reasons.append("small area %.0f%%" % (area * 100))
     if not 1.15 <= aspect <= 2.4:
         reasons.append("unusual shape %.2f" % aspect)
-    if inside_always > 0.25:
-        reasons.append("much motion inside %.0f%%" % (inside_always * 100))
+    if inside < 0.9:
+        reasons.append("changes outside %.0f%%" % ((1 - inside) * 100))
+    if sides < 4:
+        reasons.append("no clear border (%d/4 sides)" % sides)
     return roi, ("low" if reasons else "high"), ", ".join(reasons) or "ok"
 
 

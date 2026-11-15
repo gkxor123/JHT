@@ -758,13 +758,21 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     db = float((rb < 70).mean())
     if max(da, db) < 0.45:
         return None
+    # the change may be only the text inside the box: find the top of the
+    # dark box first (rows that are mostly dark in either capture)
+    top, lim = y, int(H * 0.6)
+    while top > lim and max(float((sa[top - 1, x:x + w] < 70).mean()),
+                            float((sb[top - 1, x:x + w] < 70).mean())) > 0.5:
+        top -= 1
+    if top <= lim:
+        return None
     # the box must be a dark island on a light slide: the strip just above
     # it is light in both captures (rules out dark-themed slides)
-    t = max(0, y - max(4, h // 4))
-    if t >= y:
+    t = max(0, top - max(4, h // 4))
+    if t >= top:
         return None
-    above_a = float((sa[t:y, x:x + w] < 70).mean())
-    above_b = float((sb[t:y, x:x + w] < 70).mean())
+    above_a = float((sa[t:top, x:x + w] < 70).mean())
+    above_b = float((sb[t:top, x:x + w] < 70).mean())
     if max(above_a, above_b) > 0.25:
         return None
     return da, db

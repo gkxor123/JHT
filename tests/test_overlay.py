@@ -56,7 +56,7 @@ def main():
         ("toast appears", base, toast(base, "sparganosis"), ("pointer", False)),
         ("toast replaced", toast(base, "sparganosis"), toast(base, "phyllodes tumor"), ("pointer", None)),
         ("toast vanishes", toast(base, "pash"), base, ("pointer", True)),
-        ("new figure + toast", base, toast(figure, "x"), ("different", None)),
+        ("new figure + toast", base, toast(figure, "x"), ("!pointer", None)),
         ("footnote added", base, foot, ("addition", None)),
         ("dark slide, text at bottom", dark, dark2, ("!pointer", None)),
     ]

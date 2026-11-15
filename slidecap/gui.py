@@ -473,7 +473,7 @@ class App(_BaseTk):
         ttk.Checkbutton(r1, text="여러 영상에 첫 영상의 영역을 똑같이 적용 (같은 강좌 시리즈일 때)",
                         variable=self.same_region).pack(side="left")
         r1b = ttk.Frame(opt); r1b.pack(fill="x")
-        ttk.Checkbutton(r1b, text="PPT 영역 자동 인식 (확실하면 바로 진행, 애매할 때만 찾은 영역을 보여 주고 확인)",
+        ttk.Checkbutton(r1b, text="PPT 영역 자동 인식 (묻지 않음, 애매하면 넉넉하게 잡음 / 끄면 직접 지정)",
                         variable=self.auto_region).pack(side="left")
         r2 = ttk.Frame(opt); r2.pack(fill="x", pady=(4, 0))
         ttk.Label(r2, text="민감도:").pack(side="left")
@@ -719,23 +719,29 @@ class App(_BaseTk):
                     self._log("영역 자동 인식(넉넉하게 잡음, 나중에 slidecap_region.jpg 확인): %s (%s)"
                               % (os.path.basename(p), why))
             if r is None and not self.auto and info is not None and self.auto_region.get():
-                # opened by hand: use the found area when sure, otherwise ask
-                # with the found area already drawn (just press Enter if right)
+                # opened by hand with "auto" on: same as --auto, never ask.
+                # An unsure area is widened; a preview picture is left next to
+                # the video (slidecap_region.jpg) to glance at later.
                 try:
                     from .autoregion import auto_region_for_video
                     self._set_row(p, status="영역 자동 인식 중")
                     self.status.config(text="영역 자동 인식 중: %s" % os.path.basename(p))
                     self.update()
-                    roi, sure, why, _prev = auto_region_for_video(p)
+                    roi, sure, why, prev = auto_region_for_video(p)
                 except Exception as e:
-                    roi, sure, why = None, False, str(e)
-                if roi is not None and sure:
-                    r = (tuple(roi), [])
-                    save_region(p, info, r)
+                    roi, sure, why, prev = (0, 0, info["width"], info["height"]), False, str(e), None
+                r = (tuple(roi), [])
+                save_region(p, info, r)
+                if prev:
+                    try:
+                        with open(os.path.join(os.path.dirname(p), "slidecap_region.jpg"), "wb") as fh:
+                            fh.write(prev)
+                    except OSError:
+                        pass
+                if sure:
                     self._log("영역 자동 인식: %s %s" % (os.path.basename(p), self._region_text(r)))
-                elif roi is not None:
-                    saved = (tuple(roi), [])
-                    self._log("영역이 애매해서 확인을 부탁드립니다 (찾은 영역을 그려 둠): %s" % os.path.basename(p))
+                else:
+                    self._log("영역 자동 인식(넉넉하게 잡음, slidecap_region.jpg 로 확인 가능): %s" % os.path.basename(p))
             if r is None:
                 r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:

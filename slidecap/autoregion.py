@@ -77,9 +77,15 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
     ch = (np.abs(np.diff(st, axis=0)) > DIFF).mean(axis=0)   # share of pairs with change
     if ch.mean() < 0.005:
         return None, "low", "almost nothing changes"
-    # core of the changes (a moving webcam or toolbar is trimmed off) ...
-    x0, x1 = _quantile_span(ch.sum(axis=0), 0.03)
-    y0, y1 = _quantile_span(ch.sum(axis=1), 0.03)
+    # the slide is the one big, dense block of changes; a webcam, the audience
+    # or a banner are separate, smaller / sparser blocks and are left out
+    core = _dense_block(ch)
+    if core is None:
+        return None, "low", "no dense block of changes"
+    cx0, cy0, cx1, cy1 = _extend_by_change(ch, core)
+    sub = ch[cy0:cy1, cx0:cx1]
+    x0, x1 = (cx0 + v for v in _quantile_span(sub.sum(axis=0), 0.02))
+    y0, y1 = (cy0 + v for v in _quantile_span(sub.sum(axis=1), 0.02))
     # ... grown over the blank parts of the slide up to its border
     med = np.median(st, axis=0).astype(np.uint8)
     x0, y0, x1, y1, sides = _grow(med, x0, y0, x1, y1)
@@ -97,7 +103,156 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
         reasons.append("changes outside %.0f%%" % ((1 - inside) * 100))
     if sides < 4:
         reasons.append("no clear border (%d/4 sides)" % sides)
-    return roi, ("low" if reasons else "high"), ", ".join(reasons) or "ok"
+    if not reasons:
+        return roi, "high", "screen recording"
+    # the screen fills (almost) the whole picture, e.g. a close-up camera
+    if area >= 0.75 and inside >= 0.9 and 1.15 <= aspect <= 2.4:
+        return roi, "high", "screen fills the frame"
+    # camera recording of a projector: a bright screen in a darker room
+    cam = _bright_screen(med, ch, (x0, y0, x1, y1))
+    if cam is not None:
+        return cam, "high", "projector screen"
+    return roi, "low", ", ".join(reasons)
+
+
+def _box_blur(a: np.ndarray, k: int) -> np.ndarray:
+    """Mean over a k x k window (same size output)."""
+    p = k // 2
+    s = np.pad(a.astype(np.float64), ((p + 1, p), (p + 1, p)), mode="edge").cumsum(0).cumsum(1)
+    H, W = a.shape
+    return (s[k:k + H, k:k + W] - s[:H, k:k + W] - s[k:k + H, :W] + s[:H, :W]) / float(k * k)
+
+
+def _dense_block(ch: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """Box (x0, y0, x1, y1) of the largest dense area of change."""
+    H, W = ch.shape
+    k = max(5, W // 24) | 1
+    s = _box_blur(ch, k)
+    top = float(np.percentile(s, 99))
+    if top <= 0:
+        return None
+    f = max(1, W // 160)
+    hs, ws = H // f, W // f
+    small = s[: hs * f, : ws * f].reshape(hs, f, ws, f).mean(axis=(1, 3))
+    mask = small > 0.35 * top
+    comps, lab = _components(mask)
+    if not comps:
+        return None
+    best = max(comps, key=lambda c: small[lab == c[5]].sum())
+    _, y0, x0, y1, x1, _ = best
+    # undo the widening by the blur window (half a window on each side)
+    m = (k // 2) // f
+    x0, y0 = x0 + m, y0 + m
+    x1, y1 = max(x0 + 1, x1 - m), max(y0 + 1, y1 - m)
+    return x0 * f, y0 * f, min(W, x1 * f), min(H, y1 * f)
+
+
+def _extend_by_change(ch: np.ndarray, box):
+    """Push each side of the box outward while the strip just outside still
+    changes clearly (e.g. a title line above the dense block).  A webcam or the
+    audience sits behind a gap without change and is not reached."""
+    H, W = ch.shape
+    x0, y0, x1, y1 = box
+    dens = float(ch[y0:y1, x0:x1].mean()) or 1e-6
+    step = max(2, W // 160)
+
+    def busy(strip):
+        return strip.size and float((strip > 0.05).mean()) >= 0.2 and float(strip.mean()) >= 0.25 * dens
+    for _ in range(4):
+        moved = False
+        while y0 > 0 and busy(ch[max(0, y0 - step):y0, x0:x1]):
+            y0 = max(0, y0 - step); moved = True
+        while y1 < H and busy(ch[y1:y1 + step, x0:x1]):
+            y1 = min(H, y1 + step); moved = True
+        while x0 > 0 and busy(ch[y0:y1, max(0, x0 - step):x0]):
+            x0 = max(0, x0 - step); moved = True
+        while x1 < W and busy(ch[y0:y1, x1:x1 + step]):
+            x1 = min(W, x1 + step); moved = True
+        if not moved:
+            break
+    return x0, y0, x1, y1
+
+
+def _otsu(img: np.ndarray) -> int:
+    hist = np.bincount(img.ravel(), minlength=256).astype(np.float64)
+    p = hist / hist.sum()
+    w = np.cumsum(p)
+    mu = np.cumsum(p * np.arange(256))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        between = (mu[-1] * w - mu) ** 2 / (w * (1 - w))
+    return int(np.nanargmax(between))
+
+
+def _components(mask: np.ndarray):
+    """Connected components (4-neighbour) of a small boolean mask:
+    list of (pixel count, y0, x0, y1, x1, label image index)."""
+    H, W = mask.shape
+    lab = np.zeros((H, W), np.int32)
+    comps = []
+    n = 0
+    for sy, sx in zip(*np.nonzero(mask)):
+        if lab[sy, sx]:
+            continue
+        n += 1
+        stack = [(sy, sx)]
+        lab[sy, sx] = n
+        cnt, y0, x0, y1, x1 = 0, sy, sx, sy, sx
+        while stack:
+            y, x = stack.pop()
+            cnt += 1
+            y0, x0, y1, x1 = min(y0, y), min(x0, x), max(y1, y), max(x1, x)
+            for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if 0 <= yy < H and 0 <= xx < W and mask[yy, xx] and not lab[yy, xx]:
+                    lab[yy, xx] = n
+                    stack.append((yy, xx))
+        comps.append((cnt, y0, x0, y1 + 1, x1 + 1, n))
+    return comps, lab
+
+
+def _bright_screen(med: np.ndarray, ch: np.ndarray, core) -> Optional[Rect]:
+    """Bounding box of the projected screen when the video films a projector:
+    the bright blob that holds the slide changes, clearly brighter than the room.
+    A tilted (trapezoid) screen gives its outer box, so nothing is cut off."""
+    H, W = med.shape
+    f = max(1, W // 160)                       # work on a ~160 px wide copy
+    small = med[: H // f * f, : W // f * f].reshape(H // f, f, W // f, f).mean(axis=(1, 3))
+    chs = ch[: H // f * f, : W // f * f].reshape(H // f, f, W // f, f).sum(axis=(1, 3))
+    # threshold half way between the dark room and the slide area found above
+    cx0, cy0, cx1, cy1 = (int(v) // f for v in core)
+    screen = float(np.median(small[cy0:max(cy0 + 1, cy1), cx0:max(cx0 + 1, cx1)]))
+    room = float(np.percentile(small, 10))
+    if screen - room < 30:
+        return None
+    thr = (screen + room) / 2.0
+    bright = small > thr
+    comps, lab = _components(bright)
+    if not comps:
+        return None
+    total = float(chs.sum()) or 1.0
+    best = max(comps, key=lambda c: chs[lab == c[5]].sum())
+    cnt, y0, x0, y1, x1, idx = best
+    box_area = (y1 - y0) * (x1 - x0)
+    inside_mass = float(chs[y0:y1, x0:x1].sum()) / total
+    fill = cnt / float(box_area)
+    inner = small[y0:y1, x0:x1][lab[y0:y1, x0:x1] == idx]
+    outer = small[~(lab == idx)]
+    contrast = float(np.median(inner) - np.median(outer)) if outer.size else 0.0
+    area = box_area / float(small.shape[0] * small.shape[1])
+    aspect = (x1 - x0) / float(max(1, y1 - y0))
+    if area < 0.15 or inside_mass < 0.85 or fill < 0.7 or contrast < 35 or not 1.1 <= aspect <= 2.5:
+        return None
+    pad = 1                                    # one small pixel of margin each side
+    x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+    x1, y1 = min(small.shape[1], x1 + pad), min(small.shape[0], y1 + pad)
+    X0, Y0, X1, Y1 = x0 * f, y0 * f, x1 * f, y1 * f
+    # keep it near the block of slide changes: a bright banner or stage light
+    # touching the screen is cut off (a tilted screen's corners stay inside)
+    mx, my = int(0.08 * (cx1 - cx0) * f), int(0.08 * (cy1 - cy0) * f)
+    X0, Y0 = max(X0, cx0 * f - mx), max(Y0, cy0 * f - my)
+    X1, Y1 = min(X1, cx1 * f + mx), min(Y1, cy1 * f + my)
+    if X1 - X0 < 8 or Y1 - Y0 < 8:
+        return None
+    return (X0, Y0, X1 - X0, Y1 - Y0)
 
 
 def scale_rect(r: Rect, src_wh, dst_wh) -> Rect:

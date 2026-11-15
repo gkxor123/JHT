@@ -74,9 +74,17 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
         return None, "low", "too few frames"
     st = np.stack([f.astype(np.int16) for f in frames])
     H, W = st.shape[1:]
-    ch = (np.abs(np.diff(st, axis=0)) > DIFF).mean(axis=0)   # share of pairs with change
+    D = np.abs(np.diff(st, axis=0)) > DIFF
+    ch = D.mean(axis=0)                                       # share of pairs with change
     if ch.mean() < 0.005:
         return None, "low", "almost nothing changes"
+    if len(frames) >= 80:
+        # many closely spaced samples: keep only what changes AT SLIDE FLIPS.
+        # A slide changes all at once when it is turned and stays still in
+        # between; a webcam, the audience or camera noise change at any time.
+        sync = _flip_score(D)
+        if sync is not None:
+            ch = sync
     # the slide is the one big, dense block of changes; a webcam, the audience
     # or a banner are separate, smaller / sparser blocks and are left out
     core = _dense_block(ch)
@@ -113,6 +121,25 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
     if cam is not None:
         return cam, "high", "projector screen"
     return roi, "low", ", ".join(reasons)
+
+
+def _flip_score(D: np.ndarray) -> Optional[np.ndarray]:
+    """Per pixel: how much more it changes at slide flips than at other times.
+
+    D: (steps, H, W) change masks between consecutive samples.  Flips are the
+    steps where clearly more of the picture changes than usual."""
+    e = D.mean(axis=(1, 2))
+    med = float(np.median(e))
+    mad = float(np.median(np.abs(e - med))) + 1e-6
+    ev = (e > med + 4 * mad) & (e > 0.004)
+    if ev.sum() < 4 or (~ev).sum() < 4:
+        return None
+    a = D[ev].mean(axis=0)
+    b = D[~ev].mean(axis=0)
+    s = np.clip(a - 3 * b, 0, 1)
+    if s.mean() < 0.002:
+        return None
+    return s
 
 
 def _box_blur(a: np.ndarray, k: int) -> np.ndarray:
@@ -285,7 +312,7 @@ def to_gray_small(bgr: np.ndarray, width: int = 480) -> np.ndarray:
     return cv2.resize(g, (width, h), interpolation=cv2.INTER_AREA)
 
 
-def detect_region_in_video(path: str, n: int = 40):
+def detect_region_in_video(path: str, n: int = 150):
     """(roi in video pixels or None, confidence, reason)."""
     info, frames = sample_frames(path, n)
     if not frames:
@@ -296,3 +323,58 @@ def detect_region_in_video(path: str, n: int = 40):
         return None, conf, why
     sh = small[0].shape
     return scale_rect(roi, (sh[1], sh[0]), (info["width"], info["height"])), conf, why
+
+
+def safe_region(roi: Optional[Rect], conf: str, wh) -> Rect:
+    """Region to use without asking anyone.
+
+    A sure region is used as is.  An unsure one is widened (missing part of a
+    slide is worse than a slightly wider picture; moving things inside, such
+    as a webcam, are ignored by the slide detection anyway).  No region at
+    all -> the whole picture."""
+    W, H = wh
+    if roi is None:
+        return (0, 0, W, H)
+    if conf == "high":
+        return roi
+    x, y, w, h = roi
+    mx, my = int(0.05 * W), int(0.05 * H)
+    x0, y0 = max(0, x - mx), max(0, y - my)
+    x1, y1 = min(W, x + w + mx), min(H, y + h + my)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def region_preview(frames, roi: Rect, sure: bool, width: int = 960):
+    """JPEG bytes: a typical frame with the chosen region drawn on it
+    (green = sure, orange = widened guess) for the user to glance at later."""
+    import cv2
+    imgs = [f for _, f in frames][:: max(1, len(frames) // 8)]
+    med = np.median(np.stack(imgs), axis=0).astype(np.uint8) if len(imgs) > 1 else imgs[0].copy()
+    x, y, w, h = roi
+    color = (60, 200, 60) if sure else (0, 140, 255)
+    t = max(3, med.shape[1] // 300)
+    cv2.rectangle(med, (x, y), (x + w - 1, y + h - 1), color, t)
+    s = width / float(med.shape[1])
+    small = cv2.resize(med, (width, int(med.shape[0] * s)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buf.tobytes() if ok else None
+
+
+def auto_region_for_video(path: str, n: int = 150):
+    """(region to use, sure?, reason, preview jpeg bytes) - never asks."""
+    info, frames = sample_frames(path, n)
+    wh = (info["width"], info["height"])
+    if not frames:
+        return (0, 0) + wh, False, "cannot read frames", None
+    small = [to_gray_small(f) for _, f in frames]
+    roi, conf, why = detect_region(small)
+    if roi is not None:
+        sh = small[0].shape
+        roi = scale_rect(roi, (sh[1], sh[0]), wh)
+    use = safe_region(roi, conf, wh)
+    sure = roi is not None and conf == "high"
+    try:
+        prev = region_preview(frames, use, sure)
+    except Exception:
+        prev = None
+    return use, sure, why, prev

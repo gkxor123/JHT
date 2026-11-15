@@ -389,6 +389,7 @@ class App(_BaseTk):
         self.auto = auto
         self.course_depth = course_depth
         self.handout_log = handout_log
+        self.unsure_dirs: List[str] = []
         self.title(APP_TITLE)
         try:
             self.iconbitmap(default=_resource("icon.ico"))
@@ -689,22 +690,30 @@ class App(_BaseTk):
                 except Exception:
                     info = None
             if r is None and self.auto and info is not None:
-                # try to find the slide area by itself; ask only when unsure
+                # find the slide area by itself and NEVER ask (unattended runs):
+                # an unsure area is widened; a preview picture is left in the
+                # folder (slidecap_region.jpg) for the user to glance at later
                 try:
-                    from .autoregion import detect_region_in_video
+                    from .autoregion import auto_region_for_video
                     self._set_row(p, status="영역 자동 인식 중")
                     self.update()
-                    roi, conf, why = detect_region_in_video(p)
+                    roi, sure, why, prev = auto_region_for_video(p)
                 except Exception as e:
-                    roi, conf, why = None, "low", str(e)
-                if roi is not None and conf == "high":
-                    r = (roi, [])
-                    save_region(p, info, r)
+                    roi, sure, why, prev = (0, 0, info["width"], info["height"]), False, str(e), None
+                r = (tuple(roi), [])
+                save_region(p, info, r)
+                if prev:
+                    try:
+                        with open(os.path.join(os.path.dirname(p), "slidecap_region.jpg"), "wb") as fh:
+                            fh.write(prev)
+                    except OSError:
+                        pass
+                if sure:
                     self._log("영역 자동 인식: %s %s" % (os.path.basename(p), self._region_text(r)))
                 else:
-                    self._log("영역 자동 인식이 불확실해서 물어봅니다: %s (%s)" % (os.path.basename(p), why))
-                    if roi is not None:
-                        saved = (roi, [])
+                    self.unsure_dirs.append(os.path.dirname(p))
+                    self._log("영역 자동 인식(넉넉하게 잡음, 나중에 slidecap_region.jpg 확인): %s (%s)"
+                              % (os.path.basename(p), why))
             if r is None:
                 r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:
@@ -806,7 +815,7 @@ class App(_BaseTk):
                         self.status.config(text="완료: PPT %d개 생성" % len(self.outputs))
                         if self.auto:
                             # no popup: an unattended .bat run must go on
-                            _write_auto_summary(len(self.outputs), self._n_errors())
+                            _write_auto_summary(len(self.outputs), self._n_errors(), self.unsure_dirs)
                             self.destroy()
                             return
                         if not self.cancel.is_set():
@@ -816,7 +825,7 @@ class App(_BaseTk):
                     else:
                         self.status.config(text="종료")
                         if self.auto:
-                            _write_auto_summary(0, self._n_errors())
+                            _write_auto_summary(0, self._n_errors(), self.unsure_dirs)
                             self.destroy()
                             return
         except queue.Empty:
@@ -860,13 +869,15 @@ class App(_BaseTk):
         self.destroy()
 
 
-def _write_auto_summary(n_ppt, n_err):
+def _write_auto_summary(n_ppt, n_err, unsure=()):
     """Last --auto result, read by the .bat's final notification."""
     try:
         d = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "SlideCap")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "last_auto.txt"), "w", encoding="utf-8") as f:
             f.write("%d %d %s" % (n_ppt, n_err, time.strftime("%Y-%m-%d %H:%M")))
+            for u in unsure:
+                f.write(chr(10) + "CHECK" + chr(9) + u)
     except Exception:
         pass
 

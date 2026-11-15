@@ -62,6 +62,26 @@ def main():
         sys.stderr = sys.stderr or log
     if argv and argv[0] == "--cli":
         sys.exit(cli(argv[1:]))
+    if argv and argv[0] == "--dump-frames":
+        # debugging aid: SlideCap.exe --dump-frames VIDEO OUTDIR [N]
+        import cv2
+        from slidecap.autoregion import sample_frames
+        video, outdir = argv[1], argv[2]
+        n = int(argv[3]) if len(argv) > 3 else 40
+        os.makedirs(outdir, exist_ok=True)
+        info, frames = sample_frames(video, n)
+        for i, (t, f) in enumerate(frames):
+            ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                buf.tofile(os.path.join(outdir, "f%03d_%06.1f.jpg" % (i, t)))
+        print("dumped", len(frames), "frames", info)
+        sys.exit(0)
+    if argv and argv[0] == "--detect-region":
+        # SlideCap.exe --detect-region VIDEO  -> prints X,Y,W,H confidence reason
+        from slidecap.autoregion import detect_region_in_video
+        roi, conf, why = detect_region_in_video(argv[1])
+        print("region", ",".join(map(str, roi)) if roi else "-", conf, why)
+        sys.exit(0 if roi else 1)
     if argv and argv[0] == "--selftest":
         # used by the build to verify the packaged exe works
         import av, cv2, numpy, pptx, PIL  # noqa: F401

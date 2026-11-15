@@ -616,6 +616,7 @@ class App(_BaseTk):
         if not self.files:
             # nothing new: close quietly so a .bat run is not interrupted
             print("SlideCap: no new videos")
+            _write_auto_summary(0, 0)
             self.destroy()
             return
         self._log("자동 모드: PPT가 없는 영상 %d개를 처리합니다." % len(self.files))
@@ -686,6 +687,23 @@ class App(_BaseTk):
                             self._log("저장된 영역 사용: %s" % os.path.basename(p))
                 except Exception:
                     info = None
+            if r is None and self.auto and info is not None:
+                # try to find the slide area by itself; ask only when unsure
+                try:
+                    from .autoregion import detect_region_in_video
+                    self._set_row(p, status="영역 자동 인식 중")
+                    self.update()
+                    roi, conf, why = detect_region_in_video(p)
+                except Exception as e:
+                    roi, conf, why = None, "low", str(e)
+                if roi is not None and conf == "high":
+                    r = (roi, [])
+                    save_region(p, info, r)
+                    self._log("영역 자동 인식: %s %s" % (os.path.basename(p), self._region_text(r)))
+                else:
+                    self._log("영역 자동 인식이 불확실해서 물어봅니다: %s (%s)" % (os.path.basename(p), why))
+                    if roi is not None:
+                        saved = (roi, [])
             if r is None:
                 r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:
@@ -705,6 +723,7 @@ class App(_BaseTk):
             jobs.append((p, r))
         if not jobs:
             if self.auto:
+                _write_auto_summary(0, 0)
                 self.destroy()
             return
 
@@ -785,8 +804,8 @@ class App(_BaseTk):
                         self.progress["value"] = 1000
                         self.status.config(text="완료: PPT %d개 생성" % len(self.outputs))
                         if self.auto:
-                            if not self.cancel.is_set():
-                                messagebox.showinfo(APP_TITLE, "완료되었습니다. PPT %d개를 만들었습니다." % len(self.outputs))
+                            # no popup: an unattended .bat run must go on
+                            _write_auto_summary(len(self.outputs), self._n_errors())
                             self.destroy()
                             return
                         if not self.cancel.is_set():
@@ -796,12 +815,20 @@ class App(_BaseTk):
                     else:
                         self.status.config(text="종료")
                         if self.auto:
-                            messagebox.showinfo(APP_TITLE, "만든 PPT가 없습니다. 기록 창의 내용을 확인하세요.")
+                            _write_auto_summary(0, self._n_errors())
                             self.destroy()
                             return
         except queue.Empty:
             pass
         self.after(150, self._poll)
+
+    def _n_errors(self):
+        n = 0
+        for iid in self.tree.get_children():
+            st = str(self.tree.set(iid, "status")) if "status" in self.tree["columns"] else ""
+            if st.startswith("오류") or st.startswith("열기 실패"):
+                n += 1
+        return n
 
     def _cancel(self):
         self.cancel.set()
@@ -830,6 +857,17 @@ class App(_BaseTk):
                 return
             self.cancel.set()
         self.destroy()
+
+
+def _write_auto_summary(n_ppt, n_err):
+    """Last --auto result, read by the .bat's final notification."""
+    try:
+        d = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "SlideCap")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "last_auto.txt"), "w", encoding="utf-8") as f:
+            f.write("%d %d %s" % (n_ppt, n_err, time.strftime("%Y-%m-%d %H:%M")))
+    except Exception:
+        pass
 
 
 def _resource(name):

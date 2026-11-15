@@ -1,0 +1,58 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.22.3
+
+      - name: Accuracy test on Windows (Korean folder name)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
+          python tests/test_engine.py
+
+      - name: Build exe
+        run: pyinstaller --noconfirm SlideCap.spec
+
+      - name: Test the packaged exe
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
+          $video = Join-Path $dir "연수강좌 1강.mp4"
+          Copy-Item (Join-Path $dir "basic.mp4") $video
+          $out = Join-Path $dir "exe 결과"
+          $p = Start-Process -FilePath "dist\SlideCap.exe" -Wait -PassThru `
+               -ArgumentList @("--cli", "`"$video`"", "--roi", "40,60,960,540", "--out", "`"$out`"")
+          Get-Content (Join-Path $env:USERPROFILE "slidecap_cli.log") -ErrorAction SilentlyContinue | Select-Object -Last 3
+          if ($p.ExitCode -ne 0) { throw "exe failed with exit code $($p.ExitCode)" }
+          python -c "import sys; from pptx import Presentation; n=len(Presentation(sys.argv[1]).slides); print('slides', n); sys.exit(0 if n == 19 else 1)" (Join-Path $out "연수강좌 1강.pptx")
+          $p = Start-Process -FilePath "dist\SlideCap.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlideCap-windows
+          path: dist/SlideCap.exe
+          if-no-files-found: error

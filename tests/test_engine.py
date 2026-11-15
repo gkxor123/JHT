@@ -30,6 +30,7 @@ SCENARIOS = {
     "hd_lowquality": dict(scale=1.5, crf=36, cam_inside=False, exclude_cam=False),
     "webcam_in_slide": dict(scale=1.0, crf=30, cam_inside=True, exclude_cam=False),
     "webcam_excluded": dict(scale=1.0, crf=30, cam_inside=True, exclude_cam=True),
+    "keep_build_steps": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, collapse=False),
 }
 
 
@@ -43,7 +44,9 @@ def run(name, workdir):
     path = os.path.join(workdir, name + ".mp4")
     roi, cam, segs = mtv.make(path, cfg["scale"], cfg["crf"], cfg["cam_inside"])
     excludes = [cam] if cfg["exclude_cam"] else []
-    caps = detect_slides(path, roi, excludes, Settings())
+    st = Settings()
+    st.collapse_builds = cfg.get("collapse", True)
+    caps = detect_slides(path, roi, excludes, st)
 
     # mask of pixels to compare (exclude webcam inside slide, dynamic boxes)
     base_mask = np.ones((mtv.RH, mtv.RW), bool)
@@ -59,7 +62,6 @@ def run(name, workdir):
         for i, u in enumerate(uniq):
             if u["slide"] is sg["slide"]:
                 seg_uid.append(i)
-                u["expect"] = u["expect"] or sg["expect"]
                 break
         else:
             seg_uid.append(len(uniq))
@@ -86,13 +88,18 @@ def run(name, workdir):
         if best_err > 4.0 or best_bad > 0.0006:
             problems.append("capture at %.1fs looks wrong (slide %d, mean err %.2f, bad px %.3f%%)"
                             % (c.time, best, best_err, best_bad * 100))
+    for u in uniq:
+        e = u["expect"]
+        if e == "build":
+            e = not st.collapse_builds
+        u["must"], u["may"] = (e is True), (e is True or e == "either")
     for i, u in enumerate(uniq):
         allowed = 3 if u["dynamic"] == mtv.SLOW_BOX else 1
-        if u["expect"] and hits[i] == 0:
+        if u["must"] and hits[i] == 0:
             problems.append("MISSING slide %d (shown at %.0fs)" % (i, u["start"]))
         if hits[i] > allowed:
             problems.append("slide %d captured %d times" % (i, hits[i]))
-        if not u["expect"] and hits[i]:
+        if not u["may"] and hits[i]:
             problems.append("slide %d should not be captured" % i)
 
     out = write_pptx(caps, os.path.join(workdir, name + ".pptx"))

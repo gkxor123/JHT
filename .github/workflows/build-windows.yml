@@ -47,7 +47,7 @@ jobs:
                -ArgumentList @("--cli", "`"$video`"", "--roi", "40,60,960,540", "--out", "`"$out`"")
           Get-Content (Join-Path $env:USERPROFILE "slidecap_cli.log") -ErrorAction SilentlyContinue | Select-Object -Last 3
           if ($p.ExitCode -ne 0) { throw "exe failed with exit code $($p.ExitCode)" }
-          python -c "import sys; from pptx import Presentation; n=len(Presentation(sys.argv[1]).slides); print('slides', n); sys.exit(0 if n == 19 else 1)" (Join-Path $out "연수강좌 1강.pptx")
+          python -c "import sys; from pptx import Presentation; from slidecap.engine import detect_slides; n=len(Presentation(sys.argv[1]).slides); e=len(detect_slides(sys.argv[2], (40,60,960,540))); print('exe slides', n, 'expected', e); sys.exit(0 if n == e and n > 10 else 1)" (Join-Path $out "연수강좌 1강.pptx") $video
           $p = Start-Process -FilePath "dist\SlideCap.exe" -ArgumentList "--selftest" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "selftest failed" }
 

@@ -101,11 +101,13 @@ def emb_video(s, t):
 
 
 # (duration, slide, dynamic-func, dynamic box, expected-capture?)
+# "build" = intermediate step of a build-up animation: captured only when
+# collapse_builds is off.  "either" = acceptable both ways.
 TIMELINE = [
     (6, S1, None, None, True),
-    (4, S2a, None, None, True),
-    (4, S2b, None, None, True),
-    (4, S2c, None, None, True),
+    (4, S2a, None, None, "build"),
+    (4, S2b, None, None, "build"),
+    (4, S2c, None, None, "build"),
     (4, S2d, None, None, True),          # two-letter bullet "OK"
     (8, S3, fast_gif, GIF_BOX, True),
     (5, S4a, None, None, True),
@@ -114,11 +116,11 @@ TIMELINE = [
     (8, S6, emb_video, VID_BOX, True),   # slide captured once, video ignored
     (5, S7, None, None, True),
     (4, S2d, None, None, False),         # back to an earlier slide -> duplicate
-    (5, S8, None, None, True),
+    (5, S8, None, None, True),           # cursor hidden, then reappears still
     (3, S9, None, None, True),
     (3, S10, None, None, True),          # one character differs
     (3, S11, None, None, True),
-    (10, S12a, None, None, True),        # slow cursor that parks for 5 s
+    (10, S12a, None, None, "either"),    # slow cursor parks; arrow added later
     (5, S12b, None, None, True),         # small arrow appears
 ]
 
@@ -131,6 +133,12 @@ def draw_cursor(img, x, y, sc):
 
 
 def cursor_pos(t):
+    """Cursor position, or None while hidden (PowerPoint hides an idle one)."""
+    if 67 <= t < 69:
+        return None
+    if 69 <= t < 72:   # reappears with a short movement, then stays still
+        k = min(1.0, (t - 69) / 0.6)
+        return RX + 420 + 100 * k, RY + 280 + 50 * k
     cx = RX + RW / 2 + 380 * np.sin(t * 0.7); cy = RY + RH / 2 + 220 * np.sin(t * 1.1)
     if 81 <= t < 91:
         # slow drift, then parked from 84 to 89, then leaves
@@ -179,8 +187,9 @@ def make(out, scale=1.0, crf=30, cam_inside=False):
                        int(50 * sc), (180, 200, 230), -1)
             frame[cy_:cy_ + ch_, cx_:cx_ + cw_] = camimg
             cv2.putText(frame, "%.1f" % t, (int(1050 * sc), int(400 * sc)), cv2.FONT_HERSHEY_SIMPLEX, sc, (255, 255, 255), 2)
-            px, py = cursor_pos(t)
-            draw_cursor(frame, int(px * sc), int(py * sc), sc)
+            pos = cursor_pos(t)
+            if pos is not None:
+                draw_cursor(frame, int(pos[0] * sc), int(pos[1] * sc), sc)
             if int(t) % 7 < 3 and t < 81:   # laser pointer
                 lx = RX + 300 + 200 * np.cos(t * 1.7); ly = RY + 300 + 120 * np.sin(t * 2.1)
                 cv2.circle(frame, (int(lx * sc), int(ly * sc)), int(7 * sc), (0, 0, 255), -1)

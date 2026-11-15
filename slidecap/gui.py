@@ -295,12 +295,95 @@ class RegionDialog(tk.Toplevel):
 
 
 # --------------------------------------------------------------------------
+# remembered regions
+# --------------------------------------------------------------------------
+
+REGION_FILE = "slidecap_region.json"
+
+
+def _global_store() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "SlideCap")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "regions.json")
+
+
+def _scale(r, src_wh, dst_wh):
+    (x, y, w, h), exs = r
+    sx, sy = dst_wh[0] / float(src_wh[0]), dst_wh[1] / float(src_wh[1])
+
+    def sc(a, b, c, d):
+        return (int(round(a * sx)), int(round(b * sy)), int(round(c * sx)), int(round(d * sy)))
+    return sc(x, y, w, h), [sc(*e) for e in exs]
+
+
+def load_saved_region(video: str, info: dict):
+    """Region saved for this video's folder (or a parent folder), else the
+    last region used for videos of the same resolution."""
+    import json
+    wh = (info["width"], info["height"])
+    d = os.path.dirname(os.path.abspath(video))
+    for _ in range(4):
+        f = os.path.join(d, REGION_FILE)
+        if os.path.isfile(f):
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    j = json.load(fh)
+                r = (tuple(j["roi"]), [tuple(e) for e in j.get("excludes", [])])
+                return _scale(r, (j["width"], j["height"]), wh)
+            except Exception:
+                pass
+        nd = os.path.dirname(d)
+        if nd == d:
+            break
+        d = nd
+    try:
+        with open(_global_store(), encoding="utf-8") as fh:
+            j = json.load(fh).get("%dx%d" % wh)
+        if j:
+            return tuple(j["roi"]), [tuple(e) for e in j.get("excludes", [])]
+    except Exception:
+        pass
+    return None
+
+
+def save_region(video: str, info: dict, r) -> None:
+    import json
+    (roi, exs) = r
+    rec = {"width": info["width"], "height": info["height"], "roi": list(roi),
+           "excludes": [list(e) for e in exs]}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(video)), REGION_FILE), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rec, fh)
+    except Exception:
+        pass
+    try:
+        g = _global_store()
+        allr = {}
+        if os.path.isfile(g):
+            with open(g, encoding="utf-8") as fh:
+                allr = json.load(fh)
+        allr["%dx%d" % (info["width"], info["height"])] = rec
+        with open(g, "w", encoding="utf-8") as fh:
+            json.dump(allr, fh)
+    except Exception:
+        pass
+
+
+def has_output(video: str) -> bool:
+    base = os.path.splitext(os.path.abspath(video))[0]
+    return os.path.exists(base + ".pptx")
+
+
+# --------------------------------------------------------------------------
 # main window
 # --------------------------------------------------------------------------
 
 class App(_BaseTk):
-    def __init__(self, initial_paths=()):
+    def __init__(self, initial_paths=(), auto=False):
         super().__init__()
+        self.auto = auto
         self.title(APP_TITLE)
         try:
             self.iconbitmap(default=_resource("icon.ico"))
@@ -324,6 +407,8 @@ class App(_BaseTk):
         self._build()
         self.add_paths(initial_paths)
         self.after(100, self._poll)
+        if auto:
+            self.after(400, self._auto_start)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
     # ---- layout ----
@@ -371,6 +456,7 @@ class App(_BaseTk):
         self.same_region = tk.BooleanVar(value=True)
         self.save_images = tk.BooleanVar(value=False)
         self.dedupe = tk.BooleanVar(value=True)
+        self.collapse = tk.BooleanVar(value=True)
         self.sens = tk.StringVar(value="normal")
         self.fmt = tk.StringVar(value="jpg")
         self.out_mode = tk.StringVar(value="same")
@@ -385,6 +471,9 @@ class App(_BaseTk):
             ttk.Radiobutton(r2, text=txt, value=val, variable=self.sens).pack(side="left", padx=4)
         r3 = ttk.Frame(opt); r3.pack(fill="x", pady=(4, 0))
         ttk.Checkbutton(r3, text="이전에 나온 슬라이드가 다시 나오면 건너뛰기", variable=self.dedupe).pack(side="left")
+        r3b = ttk.Frame(opt); r3b.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(r3b, text="글씨·그림이 하나씩 추가되는 슬라이드는 마지막 장면만 저장 "
+                                  "(그림이 바뀌는 장면은 모두 저장)", variable=self.collapse).pack(side="left")
         ttk.Checkbutton(r3, text="슬라이드 이미지 파일도 따로 저장", variable=self.save_images).pack(side="left", padx=12)
         ttk.Label(r3, text="이미지 형식:").pack(side="left")
         ttk.Radiobutton(r3, text="JPG", value="jpg", variable=self.fmt).pack(side="left")
@@ -422,7 +511,7 @@ class App(_BaseTk):
             if not p:
                 continue
             if os.path.isdir(p):
-                vids = list_videos(p)
+                vids = list_videos(p, recursive=self.auto)
                 if not vids:
                     self._log("폴더에 영상 파일이 없습니다: %s" % p)
             elif os.path.isfile(p):
@@ -434,6 +523,8 @@ class App(_BaseTk):
             for v in vids:
                 v = os.path.abspath(v)
                 if v in self.files:
+                    continue
+                if self.auto and has_output(v):
                     continue
                 self.files.append(v)
                 self.tree.insert("", "end", iid=v, values=(os.path.basename(v), "-", "대기"))
@@ -511,6 +602,14 @@ class App(_BaseTk):
         (x, y, w, h), ex = r
         return "%dx%d%s" % (w, h, (" (제외 %d)" % len(ex)) if ex else "")
 
+    def _auto_start(self):
+        if not self.files:
+            messagebox.showinfo(APP_TITLE, "새로 처리할 영상이 없습니다.\n(이미 같은 이름의 PPT가 있는 영상은 건너뜁니다)")
+            self.destroy()
+            return
+        self._log("자동 모드: PPT가 없는 영상 %d개를 처리합니다." % len(self.files))
+        self._start()
+
     def _ask_region(self, path, initial=None, index_text=""):
         try:
             info = video_info(path)
@@ -550,9 +649,11 @@ class App(_BaseTk):
 
         # 1) collect regions for every file (all questions first, then unattended)
         jobs = []
-        first = None
+        firsts = {}   # "same region" source; per folder in auto mode
         n = len(self.files)
         for i, p in enumerate(list(self.files)):
+            key = os.path.dirname(p) if self.auto else ""
+            first = firsts.get(key)
             r = self.regions.get(p)
             if r is None and self.same_region.get() and first is not None:
                 try:
@@ -561,18 +662,31 @@ class App(_BaseTk):
                     self._log("열 수 없는 파일: %s (%s)" % (os.path.basename(p), e))
                     self._set_row(p, status="열기 실패")
                     continue
+            info = None
+            saved = None
             if r is None:
-                r = self._ask_region(p, index_text="(%d/%d) " % (i + 1, n))
+                try:
+                    info = video_info(p)
+                    saved = load_saved_region(p, info)
+                except Exception:
+                    info = None
+            if r is None and saved is not None and self.auto:
+                r = saved
+                self._log("저장된 영역 사용: %s" % os.path.basename(p))
+            if r is None:
+                r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:
                     continue
                 if r == "skip":
                     self._set_row(p, status="건너뜀")
                     continue
+                if info is not None:
+                    save_region(p, info, r)
             self.regions[p] = r
             self._set_row(p, region=self._region_text(r), status="대기")
             if first is None:
                 try:
-                    first = (video_info(p), r)
+                    firsts[key] = (video_info(p), r)
                 except Exception:
                     pass
             jobs.append((p, r))
@@ -581,6 +695,7 @@ class App(_BaseTk):
 
         s = Settings.preset(self.sens.get())
         s.dedupe = bool(self.dedupe.get())
+        s.collapse_builds = bool(self.collapse.get())
         s.image_format = self.fmt.get()
         out_dir = self.out_dir.get().strip() if self.out_mode.get() == "dir" else None
         self.cancel.clear()
@@ -707,7 +822,7 @@ def _write_error_log(text):
         pass
 
 
-def run(paths=()):
+def run(paths=(), auto=False):
     _set_dpi_awareness()
-    app = App(paths)
+    app = App(paths, auto=auto)
     app.mainloop()

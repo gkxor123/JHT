@@ -1,6 +1,10 @@
 """Entry point.
 
 GUI (default):   SlideCap.exe [video or folder ...]
+Automatic:       SlideCap.exe --auto FOLDER [FOLDER ...]
+                 (finds every video below FOLDER that has no .pptx yet, asks
+                 the slide area only for folders without a saved area, then
+                 converts them all; used from a .bat file)
                  (dragging videos / a folder onto SlideCap.exe also works)
 Command line:    SlideCap.exe --cli VIDEO_OR_FOLDER --roi X,Y,W,H
                      [--exclude X,Y,W,H ...] [--out DIR] [--sens normal|high|low]
@@ -29,9 +33,11 @@ def cli(argv):
     ap.add_argument("--images", action="store_true")
     ap.add_argument("--png", action="store_true")
     ap.add_argument("--keep-duplicates", action="store_true")
+    ap.add_argument("--keep-build-steps", action="store_true")
     a = ap.parse_args(argv)
     s = Settings.preset(a.sens)
     s.dedupe = not a.keep_duplicates
+    s.collapse_builds = not a.keep_build_steps
     s.image_format = "png" if a.png else "jpg"
     rc = 0
     for v in list_videos(a.path):
@@ -62,7 +68,10 @@ def main():
         print("selftest ok")
         sys.exit(0)
     from slidecap.gui import run
-    run(argv)
+    if argv and argv[0] == "--auto":
+        run(argv[1:], auto=True)
+    else:
+        run(argv)
 
 
 if __name__ == "__main__":

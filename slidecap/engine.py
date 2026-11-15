@@ -61,13 +61,14 @@ class Settings:
     change_frac: float = 0.01       # change this large is never a pointer
     stable_samples: int = 3         # samples without change before capturing
     dyn_window: int = 20            # samples of history for dynamic regions
-    dyn_count: int = 10             # changed samples in window => dynamic
-    dyn_off: int = 40               # still samples before a dynamic area ends
+    dyn_count: int = 8              # samples with motion in a region => dynamic
+    dyn_off: int = 4                # extra samples a dynamic area stays ignored
+    global_frac: float = 0.25       # change this large = slide flip
     periodic_span: int = 48         # 4 equally spaced changes within => GIF
     pointer_hold: float = 0.0       # seconds a pointer trail stays masked
-    pointer_sig_hold: float = 15.0  # seconds the pointer size is remembered
     median_frames: int = 9          # frames combined to remove the cursor
     dedupe: bool = True             # skip slides identical to an earlier one
+    collapse_builds: bool = True    # text/figure build-up: keep only final step
     image_format: str = "jpg"       # jpg (smaller) or png (lossless)
 
     @classmethod
@@ -87,18 +88,27 @@ class Settings:
 class Capture:
     """One captured slide.  ``data`` holds the encoded image once final."""
 
-    def __init__(self, time, small, frames, near=None, fmt="jpg"):
+    def __init__(self, time, small, frames, near=None, fmt="jpg", dyn=None):
         self.time, self.small, self.frames, self.fmt = time, small, frames, fmt
         self.data, self.size = None, (0, 0)
         self._shape = small.shape
         self.near_bits = np.packbits(near) if near is not None else None
+        self.dyn_bits = np.packbits(dyn) if dyn is not None else None
+        self.merged = 1          # how many build steps this slide represents
+
+    def _unpack(self, bits):
+        if bits is None:
+            return None
+        n = self._shape[0] * self._shape[1]
+        return np.unpackbits(bits)[:n].reshape(self._shape)
 
     @property
     def near(self) -> Optional[np.ndarray]:
-        if self.near_bits is None:
-            return None
-        n = self._shape[0] * self._shape[1]
-        return np.unpackbits(self.near_bits)[:n].reshape(self._shape)
+        return self._unpack(self.near_bits)
+
+    @property
+    def dyn(self) -> Optional[np.ndarray]:
+        return self._unpack(self.dyn_bits)
 
     def finalize(self) -> None:
         if self.data is not None:
@@ -120,9 +130,16 @@ class Capture:
 # video helpers
 # --------------------------------------------------------------------------
 
-def list_videos(path: str) -> List[str]:
+def list_videos(path: str, recursive: bool = False) -> List[str]:
     if os.path.isdir(path):
         out = []
+        if recursive:
+            for d, dirs, files in os.walk(path):
+                dirs[:] = sorted(x for x in dirs if not x.startswith((".", "$")))
+                for name in sorted(files):
+                    if os.path.splitext(name)[1].lower() in VIDEO_EXTS:
+                        out.append(os.path.join(d, name))
+            return out
         for name in sorted(os.listdir(path)):
             p = os.path.join(path, name)
             if os.path.isfile(p) and os.path.splitext(name)[1].lower() in VIDEO_EXTS:
@@ -215,6 +232,82 @@ class _Analyzer:
         self.bw = (self.ww + self.BLOCK - 1) // self.BLOCK
         self.bh = (self.wh + self.BLOCK - 1) // self.BLOCK
         self.block_kernel = np.ones((3, 3), np.uint8)
+        self.ptr_templates: List[np.ndarray] = []
+        self._tpl_i = 0
+
+    def add_pointer_template(self, patch: np.ndarray) -> None:
+        """Remember what the pointer looks like, at full resolution.
+
+        ``patch`` is a gray full-resolution crop around a pointer that was
+        seen moving.  Pixels that differ from the patch border (the cursor's
+        fill/outline) form the template mask."""
+        if patch.shape[0] < 6 or patch.shape[1] < 6:
+            return
+        border = np.concatenate([patch[0], patch[-1], patch[:, 0], patch[:, -1]])
+        bg = float(np.median(border))
+        if np.abs(border.astype(np.float32) - bg).mean() > 12:
+            return  # busy background: cursor shape not separable
+        mask = (np.abs(patch.astype(np.int16) - bg) > 40).astype(np.uint8)
+        if mask.sum() < 15:
+            return
+        ys, xs = np.nonzero(mask)
+        y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+        tpl = (patch[y0:y1, x0:x1].copy(), mask[y0:y1, x0:x1].copy())
+        if len(self.ptr_templates) < 40:
+            self.ptr_templates.append(tpl)
+        else:
+            self.ptr_templates[self._tpl_i % 40] = tpl
+        self._tpl_i += 1
+
+    def looks_like_pointer(self, grays, x, y, w, h) -> bool:
+        """Is there a pointer (as learnt) inside the work-res box x,y,w,h of
+        one of the full-resolution gray images?"""
+        if not self.ptr_templates:
+            return False
+        for g in grays:
+            sx = g.shape[1] / float(self.ww)
+            sy = g.shape[0] / float(self.wh)
+            pad = 6
+            X0 = max(0, int((x - pad) * sx)); Y0 = max(0, int((y - pad) * sy))
+            X1 = min(g.shape[1], int((x + w + pad) * sx)); Y1 = min(g.shape[0], int((y + h + pad) * sy))
+            reg = g[Y0:Y1, X0:X1]
+            for tpl, msk in self.ptr_templates:
+                th, tw = tpl.shape
+                if th > reg.shape[0] or tw > reg.shape[1]:
+                    continue
+                r = cv2.matchTemplate(reg.astype(np.float32), tpl.astype(np.float32),
+                                      cv2.TM_SQDIFF, mask=msk.astype(np.float32))
+                if float(r.min()) / float(msk.sum()) < 25.0 ** 2:
+                    return True
+        return False
+
+    def background(self, small: np.ndarray) -> np.ndarray:
+        """Mask of plain slide background (smooth surface incl. gradients)."""
+        g = cv2.resize(small, (80, 45), interpolation=cv2.INTER_AREA).astype(np.float32)
+        yy, xx = np.mgrid[0:45, 0:80].astype(np.float32)
+        xx /= 80.0; yy /= 45.0
+        A = np.stack([np.ones_like(xx), xx, yy, xx * xx, yy * yy, xx * yy], -1).reshape(-1, 6)
+        v = g.reshape(-1)
+        # start from the dominant brightness, then follow gradients
+        hist = np.bincount(np.clip(v, 0, 255).astype(np.int32), minlength=256)
+        mode = int(np.argmax(np.convolve(hist, np.ones(9), "same")))
+        use = np.abs(v - mode) < 16
+        coef = None
+        for _ in range(4):
+            if use.sum() < 50:
+                break
+            coef, *_ = np.linalg.lstsq(A[use], v[use], rcond=None)
+            use = np.abs(A @ coef - v) < 10
+        if coef is None:
+            return np.zeros_like(small, bool)
+        Y, X = np.mgrid[0:self.wh, 0:self.ww].astype(np.float32)
+        X /= self.ww; Y /= self.wh
+        surf = coef[0] + coef[1] * X + coef[2] * Y + coef[3] * X * X + coef[4] * Y * Y + coef[5] * X * Y
+        bg = np.abs(small.astype(np.float32) - surf) < 14
+        # the fitted surface must describe a good part of the slide
+        if bg.mean() < 0.25:
+            return np.zeros_like(small, bool)
+        return bg
 
     def prep(self, crop: np.ndarray) -> np.ndarray:
         g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -300,20 +393,21 @@ def detect_slides(
     D = 2                                  # delay for pointer evaluation (samples)
     next_t = None
     raws: deque = deque(maxlen=3)          # raw small frames
+    crops: deque = deque(maxlen=3)         # matching full-resolution crops
     cleans: deque = deque(maxlen=D + 2)    # cleaned (pointer-free) small frames
     transients: deque = deque(maxlen=D + 1)
     ptr_masks: deque = deque()             # (t, mask)
-    ptr_sigs: deque = deque()              # (t, (w, h, area))
+    ptr_sigs: deque = deque(maxlen=400)    # (t, (w, h, area)) pointer sizes
     ptr_last: deque = deque(maxlen=4)      # last pointer positions (held)
     near = None
     zero_mask = np.zeros((a.wh, a.ww), np.uint8)
     prev_small = None
     prev_small_near = None
     bhist: deque = deque(maxlen=s.dyn_window)
-    bsum = np.zeros((a.bh, a.bw), np.int16)
-    dyn_state = np.zeros((a.bh, a.bw), np.uint8)
+    ehist: deque = deque(maxlen=s.dyn_window)
+    dyn_seen = np.full((a.bh, a.bw), -10 ** 6, np.int64)
     prev_bm = np.zeros((a.bh, a.bw), np.int16)
-    last_change = np.full((a.bh, a.bw), -10 ** 6, np.int64)
+    sig_area = 0.0
     edges = np.zeros((a.bh, a.bw, 4), np.int64)
 
     run_start = None
@@ -353,22 +447,35 @@ def detect_slides(
                 raise ValueError("선택 영역이 영상 밖에 있습니다.")
             raw = a.prep(crop)
             raws.append(raw)
+            crops.append(crop)
             clean = _median3(*raws) if len(raws) == 3 else raw
             clean_prev = cleans[-1] if cleans else clean
             cleans.append(clean)
 
             # ---- dynamic regions (GIF / video / webcam), block based ----
+            # motion sources: changes of the clean picture, plus short-lived
+            # changes much larger than a pointer (fast GIF objects / video,
+            # which the median removes just like a cursor)
             motion = a.diff(clean, clean_prev)
-            bm = a.to_blocks(motion)
-            if len(bhist) == bhist.maxlen:
-                bsum -= bhist[0]
+            T = a.diff(raw, clean)
+            # a change covering much of the slide is a flip, not animation
+            bm = a.to_blocks(motion) if motion.mean() < s.global_frac else \
+                np.zeros((a.bh, a.bw), np.int16)
+            if T.any():
+                big_area = max(2.5 * sig_area, 0.004 * a.total)
+                tb = a.blobs(T)
+                tb = tb[tb[:, cv2.CC_STAT_AREA] > big_area]
+                if len(tb):
+                    tm = np.zeros_like(T)
+                    for x_, y_, w_, h_, _ in tb:
+                        tm[y_:y_ + h_, x_:x_ + w_] = 1
+                    bm |= a.to_blocks(tm)
             bhist.append(bm)
-            bsum += bm
             changed = bm > 0
-            last_change[changed] = sample_idx
             edge = changed & (prev_bm == 0)
+            ehist.append(edge.astype(np.int16))
             prev_bm = bm
-            if edge.any():
+            if edge.any():   # periodic changes (slow GIF)
                 edges[edge] = np.roll(edges[edge], -1, axis=1)
                 edges[edge, 3] = sample_idx
                 e = edges[edge]
@@ -376,13 +483,35 @@ def detect_slides(
                 periodic = ((e[:, 0] > 0) & (e[:, 3] - e[:, 0] <= s.periodic_span) &
                             (iv.max(axis=1) - iv.min(axis=1) <= 1))
                 if periodic.any():
-                    tmp = dyn_state[edge]; tmp[periodic] = 1; dyn_state[edge] = tmp
-            dyn_state[bsum >= s.dyn_count] = 1
-            dyn_state[(sample_idx - last_change) > s.dyn_off] = 0
+                    tmp = dyn_seen[edge]; tmp[periodic] = sample_idx; dyn_seen[edge] = tmp
+            # regions (connected over the window) that moved in many samples
+            bsum = np.zeros((a.bh, a.bw), np.int16)
+            for h_ in bhist:
+                bsum += h_
+            esum = np.zeros((a.bh, a.bw), np.int16)
+            for h_ in ehist:
+                esum += h_
+            # blocks that keep moving or changed in several separate events;
+            # a single change (slide flip, picture swap) does not count
+            moving_blk = (bsum >= 6) | (esum >= 2)
+            union = moving_blk.astype(np.uint8)
+            if union.any():
+                union = cv2.dilate(union, a.block_kernel)
+                n_, lab, st_, _ = cv2.connectedComponentsWithStats(union, connectivity=8)
+                counts = np.zeros(n_, np.int32)
+                for h_ in bhist:
+                    if h_.any():
+                        counts[np.unique(lab[h_ > 0])] += 1
+                for i_ in range(1, n_):
+                    if counts[i_] >= s.dyn_count:
+                        x_, y_, w_, h_ = st_[i_, :4]
+                        sub = (lab[y_:y_ + h_, x_:x_ + w_] == i_) & moving_blk[y_:y_ + h_, x_:x_ + w_]
+                        ys, xs = np.nonzero(sub)
+                        dyn_seen[y_ + ys.min():y_ + ys.max() + 1, x_ + xs.min():x_ + xs.max() + 1] = sample_idx
+            dyn_state = ((sample_idx - dyn_seen) <= s.dyn_off).astype(np.uint8)
             dyn = a.dyn_mask(dyn_state) if dyn_state.any() else None
 
             # ---- pointer tracking ----
-            T = a.diff(raw, clean)
             if dyn is not None:
                 T &= (1 - dyn)
             transients.append(T)
@@ -393,7 +522,7 @@ def detect_slides(
                 pm = transients[0] & (1 - persist)
                 if pm.any():
                     st = a.blobs(pm)
-                    st = st[st[:, cv2.CC_STAT_AREA] < 0.02 * a.total]
+                    st = st[st[:, cv2.CC_STAT_AREA] < 0.008 * a.total]
                     if len(st):
                         pmd = cv2.dilate(pm, a.ptr_kernel)
                         if s.pointer_hold > 0:
@@ -404,6 +533,12 @@ def detect_slides(
                             acc |= m_
                         near = cv2.dilate(acc, a.near_kernel)
                         big = st[np.argmax(st[:, cv2.CC_STAT_AREA])]
+                        bx, by, bw_, bh_ = big[:4]
+                        if len(crops) == 3 and bw_ >= 4 and bh_ >= 4:
+                            fx = crops[0].shape[1] / float(a.ww); fy = crops[0].shape[0] / float(a.wh)
+                            pg = cv2.cvtColor(crops[0][int(by * fy):int((by + bh_) * fy),
+                                                       int(bx * fx):int((bx + bw_) * fx)], cv2.COLOR_BGR2GRAY)
+                            a.add_pointer_template(pg)
                         ptr_sigs.append((t, (big[2], big[3], big[4])))
             # slowly moving pointer: small blobs in consecutive raw differences
             # that continue next to each other
@@ -425,12 +560,11 @@ def detect_slides(
                 prev_small_near = cv2.dilate(cur, a.near_kernel) if cur.any() else None
             while ptr_masks and t - ptr_masks[0][0] > s.pointer_hold:
                 ptr_masks.popleft()
-            while ptr_sigs and t - ptr_sigs[0][0] > s.pointer_sig_hold:
-                ptr_sigs.popleft()
             ptr_sig = None
             if ptr_sigs:
                 arr = np.array([v for _, v in ptr_sigs])
                 ptr_sig = tuple(np.percentile(arr, 75, axis=0))
+                sig_area = float(ptr_sig[2])
             near_now = near if near is not None else zero_mask
 
             def chg(m, other_near=None):
@@ -495,7 +629,7 @@ def detect_slides(
                             good = [(t, crop.copy())]
                         cap = Capture(time=max(0.0, good[0][0] - step), small=clean,
                                       frames=[cr for _, cr in good], near=near_now.copy(),
-                                      fmt=s.image_format)
+                                      fmt=s.image_format, dyn=dyn)
                         captures.append(cap)
                         if len(cap.frames) >= s.median_frames:
                             cap.finalize()
@@ -513,15 +647,105 @@ def detect_slides(
                        [(run_frames[-1][0], run_frames[-1][2])]
                 captures.append(Capture(time=max(0.0, good[0][0] - step), small=clean,
                                         frames=[cr for _, cr in good], near=near_now.copy(),
-                                        fmt=s.image_format))
+                                        fmt=s.image_format, dyn=dyn))
     finally:
         container.close()
 
     for c in captures:
         c.finalize()
+    sig = None
+    if ptr_sigs:
+        sig = tuple(np.percentile(np.array([v for _, v in ptr_sigs]), 75, axis=0))
+    captures = merge_captures(captures, a, s, sig, debug)
     if progress:
         progress(1.0, len(captures))
     return captures
+
+
+# --------------------------------------------------------------------------
+# post-processing: drop pointer-only changes, collapse build-up animations
+# --------------------------------------------------------------------------
+
+def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
+    """How does capture ``c`` differ from the previous capture ``p``?
+
+    Returns (kind, keep_c) where kind is
+      "pointer"  - only cursor-sized spots differ (pointer appeared/vanished)
+      "addition" - content was added onto empty background (bullet, text,
+                   figure building up); nothing that was there changed
+      "different"- anything else (new slide, image replaced, ...)
+    keep_c tells, for "pointer", which version is cleaner (fewer edges).
+    """
+    # ignore only moving content present in both (e.g. the same GIF)
+    excl = np.zeros_like(p.small)
+    if p.dyn is not None and c.dyn is not None:
+        excl = p.dyn & c.dyn
+    m = a.diff(p.small, c.small) & (1 - excl)
+    if not m.any():
+        return "pointer", False
+    md = cv2.dilate(m, a.kernel)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
+    if sig is None:  # typical cursor size relative to the analysed width
+        pw, ph = a.ww * 0.032, a.ww * 0.042
+        sig = (pw, ph, pw * ph * 0.75)
+    pw, ph, pa = sig
+    ea = cv2.Canny(p.small, 40, 120) > 0
+    eb = cv2.Canny(c.small, 40, 120) > 0
+    bg_a = a.background(p.small)
+    bg_b = a.background(c.small)
+    grays = None
+    kinds = []
+    edge_a = edge_b = 0
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area < a.tiny_blob:
+            continue
+        reg = labels[y:y + h, x:x + w] == i
+        fa = float(ea[y:y + h, x:x + w][reg].mean())
+        fb = float(eb[y:y + h, x:x + w][reg].mean())
+        mreg = m[y:y + h, x:x + w].astype(bool) & reg
+        if mreg.sum() < max(12, 0.0001 * a.total):
+            continue   # faint residue (e.g. trace of a cursor), not content
+        # changed pixels that were plain background before / are now
+        on_bg_a = float(bg_a[y:y + h, x:x + w][mreg].mean()) if mreg.any() else 0.0
+        on_bg_b = float(bg_b[y:y + h, x:x + w][mreg].mean()) if mreg.any() else 0.0
+        small = w <= pw * 1.6 and h <= ph * 1.6 and area <= pa * 2.0
+        if small and grays is None:
+            grays = [cv2.cvtColor(p.image, cv2.COLOR_BGR2GRAY), cv2.cvtColor(c.image, cv2.COLOR_BGR2GRAY)]
+        if small and a.looks_like_pointer(grays, x, y, w, h):
+            kinds.append("pointer")
+            edge_a += fa * area; edge_b += fb * area
+        elif on_bg_a > 0.85 and on_bg_b < 0.7:
+            kinds.append("addition")   # drawn onto empty background
+        else:
+            kinds.append("other")
+    if not kinds or all(k == "pointer" for k in kinds):
+        return "pointer", edge_b < edge_a
+    if "other" not in kinds:
+        return "addition", True
+    return "different", True
+
+
+def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,
+                   debug=None) -> List[Capture]:
+    out: List[Capture] = []
+    for c in caps:
+        if out:
+            p = out[-1]
+            kind, keep_c = _relation(p, c, a, sig)
+            if debug:
+                debug("t=%.2f merge-check vs %.2f: %s" % (c.time, p.time, kind))
+            if kind == "pointer":
+                if keep_c:
+                    c.time, c.merged = p.time, p.merged
+                    out[-1] = c
+                continue
+            if kind == "addition" and s.collapse_builds:
+                c.time, c.merged = p.time, p.merged + 1
+                out[-1] = c
+                continue
+        out.append(c)
+    return out
 
 
 # --------------------------------------------------------------------------

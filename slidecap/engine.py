@@ -721,6 +721,11 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
             kinds.append("overlay")
             dark_a += ov[0]; dark_b += ov[1]
             continue
+        if _edge_strip(a, x, y, w, h):
+            # a thin strip along the region's edge: a webcam / window border
+            # that slipped into the region, not slide content
+            kinds.append("edge")
+            continue
         small = w <= pw * 1.6 and h <= ph * 1.6 and area <= pa * 2.0
         if small and grays is None:
             grays = [cv2.cvtColor(p.image, cv2.COLOR_BGR2GRAY), cv2.cvtColor(c.image, cv2.COLOR_BGR2GRAY)]
@@ -733,14 +738,27 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
             kinds.append("moving")     # GIF seen moving in one capture only
         else:
             kinds.append("other")
-    if "overlay" in kinds and all(k in ("pointer", "overlay", "moving") for k in kinds):
+    if "overlay" in kinds and all(k in ("pointer", "overlay", "moving", "edge") for k in kinds):
         return "pointer", dark_b < dark_a
     kinds = ["other" if k == "moving" else k for k in kinds]  # unchanged rule without an overlay
+    if "edge" in kinds and all(k in ("pointer", "edge") for k in kinds):
+        return "pointer", False                      # keep the earlier capture
+    kinds = [k for k in kinds if k != "edge"]
     if not kinds or all(k == "pointer" for k in kinds):
         return "pointer", edge_b < edge_a
     if "other" not in kinds:
         return "addition", True
     return "different", True
+
+
+def _edge_strip(a: "_Analyzer", x, y, w, h) -> bool:
+    """Changed box lying entirely in the outer 6% band along one side of the
+    region: e.g. a speaker's webcam edge caught inside the region (often in
+    several detached pieces).  Slide text practically never sits that close
+    to the slide edge, and a real slide change is bigger than this anyway."""
+    W, H = a.ww, a.wh
+    bx, by = max(4, int(W * 0.06)), max(4, int(H * 0.06))
+    return x + w <= bx or x >= W - bx or y + h <= by or y >= H - by
 
 
 def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
@@ -789,8 +807,77 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     return da, db
 
 
+def _learn_pointer_from_captures(caps: List[Capture], a: _Analyzer, sig, debug=None) -> int:
+    """Learn the cursor's look from the captures themselves.
+
+    A small shape that shows up between neighbouring captures at several
+    different places is the cursor (an arrow drawn on a slide appears once
+    and stays put).  Each such shape becomes a pointer template, so the merge
+    below treats it like a cursor even when it was never seen moving."""
+    if len(caps) < 4:
+        return 0
+    if sig is None:
+        pw, ph = a.ww * 0.032, a.ww * 0.042
+    else:
+        pw, ph = sig[0], sig[1]
+    items = []   # (descriptor, centre, capture index, box)
+    for i in range(1, len(caps)):
+        m = a.diff(caps[i - 1].small, caps[i].small)
+        if m.mean() > 0.01:
+            continue                       # a real slide change, not a cursor move
+        md = cv2.dilate(m, a.kernel)
+        n, _, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
+        for k in range(1, n):
+            x, y, w, h, area = stats[k]
+            if area < a.tiny_blob or w > pw * 1.8 or h > ph * 1.8:
+                continue
+            # the capture where the shape is (more contrast inside the box)
+            pa_ = caps[i - 1].small[y:y + h, x:x + w].astype(np.float32)
+            pb_ = caps[i].small[y:y + h, x:x + w].astype(np.float32)
+            j, patch = (i - 1, pa_) if pa_.std() > pb_.std() else (i, pb_)
+            if patch.std() < 8:
+                continue
+            d = cv2.resize(patch, (12, 12), interpolation=cv2.INTER_AREA).ravel()
+            d = d - d.mean()
+            nrm = float(np.linalg.norm(d))
+            if nrm < 1e-3:
+                continue
+            items.append((d / nrm, (x + w / 2.0, y + h / 2.0), j, (x, y, w, h)))
+    if len(items) < 3:
+        return 0
+    D = np.stack([it[0] for it in items])
+    sim = D @ D.T
+    C = np.array([it[1] for it in items])
+    dist = np.sqrt(((C[:, None, :] - C[None, :, :]) ** 2).sum(-1))
+    far = dist > max(pw, ph)
+    learned, done = 0, set()
+    for k, it in enumerate(items):
+        if int(((sim[k] > 0.85) & far[k]).sum()) < 2:
+            continue                       # seen in fewer than 3 places
+        j, (x, y, w, h) = it[2], it[3]
+        key = (j, x // 4, y // 4)
+        if key in done:
+            continue
+        done.add(key)
+        g = cv2.cvtColor(caps[j].image, cv2.COLOR_BGR2GRAY)
+        sx, sy = g.shape[1] / float(a.ww), g.shape[0] / float(a.wh)
+        pad = 3
+        X0, Y0 = max(0, int((x - pad) * sx)), max(0, int((y - pad) * sy))
+        X1, Y1 = min(g.shape[1], int((x + w + pad) * sx)), min(g.shape[0], int((y + h + pad) * sy))
+        before = a._tpl_i
+        a.add_pointer_template(g[Y0:Y1, X0:X1])
+        if a._tpl_i > before:
+            learned += 1
+        if learned >= 12:
+            break
+    if debug:
+        debug("learned %d pointer templates from recurring small shapes" % learned)
+    return learned
+
+
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,
                    debug=None) -> List[Capture]:
+    _learn_pointer_from_captures(caps, a, sig, debug)
     out: List[Capture] = []
     for c in caps:
         if out:

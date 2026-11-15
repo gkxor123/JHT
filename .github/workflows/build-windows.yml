@@ -31,7 +31,7 @@ jobs:
         run: |
           $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
           $fail = 0
-          foreach ($t in "tests/test_autoscan.py", "tests/test_autoregion.py", "tests/test_overlay.py", "tests/test_engine.py") {
+          foreach ($t in "tests/test_autoscan.py", "tests/test_autoregion.py", "tests/test_overlay.py", "tests/test_cursor_merge.py", "tests/test_engine.py") {
             $out = & python $t 2>&1 | ForEach-Object { "$_" }
             $out
             if ($LASTEXITCODE -ne 0) {

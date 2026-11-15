@@ -1,8 +1,10 @@
 """Entry point.
 
 GUI (default):   SlideCap.exe [video or folder ...]
-Automatic:       SlideCap.exe --auto FOLDER [FOLDER ...]
-                 (finds every video below FOLDER that has no .pptx yet, asks
+Automatic:       SlideCap.exe --auto FOLDER [FOLDER ...] [--course-depth 2]
+                 (finds every video below FOLDER that has no .pptx yet and
+                 whose course folder, 2 levels below FOLDER, holds no lecture
+                 notes (PDF/PPT...) yet, asks
                  the slide area only for folders without a saved area, then
                  converts them all; used from a .bat file)
                  (dragging videos / a folder onto SlideCap.exe also works)
@@ -69,7 +71,15 @@ def main():
         sys.exit(0)
     from slidecap.gui import run
     if argv and argv[0] == "--auto":
-        run(argv[1:], auto=True)
+        from slidecap.autoscan import DEFAULT_COURSE_DEPTH
+        depth, paths, rest = DEFAULT_COURSE_DEPTH, [], argv[1:]
+        while rest:
+            a = rest.pop(0)
+            if a == "--course-depth" and rest:
+                depth = int(rest.pop(0))
+            else:
+                paths.append(a)
+        run(paths, auto=True, course_depth=depth)
     else:
         run(argv)
 

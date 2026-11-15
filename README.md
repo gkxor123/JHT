@@ -50,10 +50,15 @@ SlideCap.exe --auto "E:\01_Radiology\연수강좌 원본"
 ```
 
 - 지정한 폴더 아래(하위 폴더 포함)에서 **아직 PPT가 없는 영상만** 찾아 처리합니다.
+- **강좌 폴더**(지정 폴더 기준 2단계 아래, 예: `연수강좌 원본\01_Chest\2026-11-15 OO연수강좌`)에
+  강의록으로 보이는 파일(PDF, PPT, PPTX, DOC, HWP 등)이 하나라도 있으면 그 강좌는 통째로 건너뜁니다.
+  SlideCap이 만든 PPT(영상과 같은 이름)는 강의록으로 치지 않습니다. 단계는 `--course-depth N`으로 바꿀 수 있습니다.
+- 처리할 영상이 없으면 창 없이 바로 끝나고, 다 끝나면 완료 알림 후 창이 닫힙니다(.bat이 다음 단계로 진행).
+- 저장된 영역은 그 폴더(또는 상위 폴더)의 `slidecap_region.json`만 자동 적용합니다.
+  새 강좌 폴더는 처음 한 번 영역을 묻습니다(직전 영역이 초기값으로 표시됨).
 - 결과 PPT는 영상과 같은 폴더에 같은 이름으로 생깁니다.
 - 영역 지정 창은 **폴더별로 처음 한 번만** 뜹니다. 정한 영역은 그 폴더의 `slidecap_region.json`에 저장되고,
   이후 같은 폴더(또는 하위 폴더)에 추가된 영상은 묻지 않고 처리합니다.
-- 새로 처리할 영상이 없으면 그렇다고 알려 주고 끝납니다.
 
 ## 명령줄 사용 (선택)
 
@@ -66,7 +71,8 @@ SlideCap.exe --cli "D:\강의\1강.mp4" --roi 40,60,960,540 [--exclude X,Y,W,H] 
 ```
 pip install -r requirements.txt
 python slidecap_main.py          # GUI 실행
-python tests/test_engine.py      # 정확도 테스트 (합성 강의 영상 4종)
+python tests/test_engine.py      # 정확도 테스트 (합성 강의 영상)
+python tests/test_autoscan.py    # 자동 모드 선택 규칙 테스트
 pyinstaller SlideCap.spec        # exe 빌드 (dist/SlideCap.exe)
 ```
 

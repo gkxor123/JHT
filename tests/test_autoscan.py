@@ -1,0 +1,55 @@
+"""Tests for the --auto selection rules (no video libraries needed)."""
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from slidecap.autoscan import scan  # noqa: E402
+
+
+def touch(root, rel):
+    p = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "wb").close()
+    return p
+
+
+def main():
+    with tempfile.TemporaryDirectory() as root:
+        # course with a handout PDF -> skipped
+        touch(root, "01_Chest/2026-01 강좌A/1강.mp4")
+        touch(root, "01_Chest/2026-01 강좌A/강의록.pdf")
+        # handout in a sub folder of the course -> skipped
+        touch(root, "02_GI/2026-02 강좌B/영상/1강.mov")
+        touch(root, "02_GI/2026-02 강좌B/자료/강의록.pptx")
+        # no handout -> both videos
+        new1 = touch(root, "03_GU/2026-11-15 새 강좌/1-1.mp4")
+        new2 = touch(root, "03_GU/2026-11-15 새 강좌/sub/1-2.mp4")
+        # SlideCap output alone does not count as a handout, and its video is done
+        touch(root, "04_MSK/2026-03 강좌C/1강.mp4")
+        touch(root, "04_MSK/2026-03 강좌C/1강.pptx")
+        new3 = touch(root, "04_MSK/2026-03 강좌C/2강.mp4")
+        # Office lock file is ignored
+        touch(root, "05_Neuro/2026-04 강좌D/~$x.pptx")
+        new4 = touch(root, "05_Neuro/2026-04 강좌D/1강.wmv")
+        # video directly in a subspecialty folder: its own folder is the course
+        new5 = touch(root, "06_H&N/loose.mp4")
+
+        todo, skipped = scan(root)
+        want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5))
+        assert sorted(todo) == want, (todo, want)
+        assert len(skipped) == 2, skipped
+    print("autoscan tests passed")
+
+    real = os.environ.get("SLIDECAP_REAL_ROOT")
+    if real:
+        todo, skipped = scan(real)
+        courses = sorted({os.path.relpath(os.path.dirname(v), real).split(os.sep)[1] for v in todo
+                          if len(os.path.relpath(os.path.dirname(v), real).split(os.sep)) > 1})
+        print("real: %d videos to convert in %d courses, %d courses skipped" % (len(todo), len(courses), len(skipped)))
+        for c in courses:
+            print("  ", c)
+
+
+if __name__ == "__main__":
+    main()

@@ -16,6 +16,7 @@ from PIL import Image, ImageTk
 from . import __version__
 from .engine import (Cancelled, Settings, VIDEO_EXTS, fmt_time, frame_at,
                      list_videos, process_video, video_info)
+from .autoscan import DEFAULT_COURSE_DEPTH, scan as auto_scan
 
 APP_TITLE = "SlideCap - 강의 영상 → PPT %s" % __version__
 
@@ -317,9 +318,9 @@ def _scale(r, src_wh, dst_wh):
     return sc(x, y, w, h), [sc(*e) for e in exs]
 
 
-def load_saved_region(video: str, info: dict):
-    """Region saved for this video's folder (or a parent folder), else the
-    last region used for videos of the same resolution."""
+def load_saved_region(video: str, info: dict, folder_only: bool = False):
+    """Region saved for this video's folder (or a parent folder), else (unless
+    folder_only) the last region used for videos of the same resolution."""
     import json
     wh = (info["width"], info["height"])
     d = os.path.dirname(os.path.abspath(video))
@@ -337,6 +338,8 @@ def load_saved_region(video: str, info: dict):
         if nd == d:
             break
         d = nd
+    if folder_only:
+        return None
     try:
         with open(_global_store(), encoding="utf-8") as fh:
             j = json.load(fh).get("%dx%d" % wh)
@@ -381,9 +384,10 @@ def has_output(video: str) -> bool:
 # --------------------------------------------------------------------------
 
 class App(_BaseTk):
-    def __init__(self, initial_paths=(), auto=False):
+    def __init__(self, initial_paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH):
         super().__init__()
         self.auto = auto
+        self.course_depth = course_depth
         self.title(APP_TITLE)
         try:
             self.iconbitmap(default=_resource("icon.ico"))
@@ -510,7 +514,13 @@ class App(_BaseTk):
             p = p.strip().strip('"').strip("{}")
             if not p:
                 continue
-            if os.path.isdir(p):
+            if os.path.isdir(p) and self.auto:
+                vids, skipped = auto_scan(p, self.course_depth)
+                for c, h in sorted(skipped.items()):
+                    self._log("강의록 있음, 건너뜀: %s (%s)" % (os.path.relpath(c, p), os.path.basename(h)))
+                if skipped:
+                    self._log("강의록이 있는 강좌 %d개는 건너뜁니다." % len(skipped))
+            elif os.path.isdir(p):
                 vids = list_videos(p, recursive=self.auto)
                 if not vids:
                     self._log("폴더에 영상 파일이 없습니다: %s" % p)
@@ -604,7 +614,8 @@ class App(_BaseTk):
 
     def _auto_start(self):
         if not self.files:
-            messagebox.showinfo(APP_TITLE, "새로 처리할 영상이 없습니다.\n(이미 같은 이름의 PPT가 있는 영상은 건너뜁니다)")
+            # nothing new: close quietly so a .bat run is not interrupted
+            print("SlideCap: no new videos")
             self.destroy()
             return
         self._log("자동 모드: PPT가 없는 영상 %d개를 처리합니다." % len(self.files))
@@ -668,11 +679,13 @@ class App(_BaseTk):
                 try:
                     info = video_info(p)
                     saved = load_saved_region(p, info)
+                    if self.auto:
+                        own = load_saved_region(p, info, folder_only=True)
+                        if own is not None:
+                            r = own
+                            self._log("저장된 영역 사용: %s" % os.path.basename(p))
                 except Exception:
                     info = None
-            if r is None and saved is not None and self.auto:
-                r = saved
-                self._log("저장된 영역 사용: %s" % os.path.basename(p))
             if r is None:
                 r = self._ask_region(p, initial=saved, index_text="(%d/%d) " % (i + 1, n))
                 if r is None:
@@ -691,6 +704,8 @@ class App(_BaseTk):
                     pass
             jobs.append((p, r))
         if not jobs:
+            if self.auto:
+                self.destroy()
             return
 
         s = Settings.preset(self.sens.get())
@@ -769,12 +784,21 @@ class App(_BaseTk):
                         self.open_btn.config(state="normal")
                         self.progress["value"] = 1000
                         self.status.config(text="완료: PPT %d개 생성" % len(self.outputs))
+                        if self.auto:
+                            if not self.cancel.is_set():
+                                messagebox.showinfo(APP_TITLE, "완료되었습니다. PPT %d개를 만들었습니다." % len(self.outputs))
+                            self.destroy()
+                            return
                         if not self.cancel.is_set():
                             if messagebox.askyesno(APP_TITLE, "완료되었습니다. PPT %d개를 만들었습니다.\n\n결과 폴더를 열까요?"
                                                    % len(self.outputs)):
                                 self._open_out()
                     else:
                         self.status.config(text="종료")
+                        if self.auto:
+                            messagebox.showinfo(APP_TITLE, "만든 PPT가 없습니다. 기록 창의 내용을 확인하세요.")
+                            self.destroy()
+                            return
         except queue.Empty:
             pass
         self.after(150, self._poll)
@@ -822,7 +846,7 @@ def _write_error_log(text):
         pass
 
 
-def run(paths=(), auto=False):
+def run(paths=(), auto=False, course_depth=DEFAULT_COURSE_DEPTH):
     _set_dpi_awareness()
-    app = App(paths, auto=auto)
+    app = App(paths, auto=auto, course_depth=course_depth)
     app.mainloop()

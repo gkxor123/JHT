@@ -39,13 +39,24 @@ def main():
         touch(root, "07_INT/2026-05 강좌E/2026 연수강좌 프로그램.pdf")
         touch(root, "07_INT/2026-05 강좌E/안내장_ver. June.PDF")
         new6 = touch(root, "07_INT/2026-05 강좌E/1강.mp4")
-        # handout for some lectures only, but the user asked to convert
-        touch(root, "08_Heart/2026-06 강좌F/1. Basic MRI.pdf")
+        # handouts for some lectures only + marker: convert only lectures without notes
         touch(root, "08_Heart/2026-06 강좌F/slidecap_변환.txt")
-        new7 = touch(root, "08_Heart/2026-06 강좌F/2강.mp4")
+        touch(root, "08_Heart/2026-06 강좌F/1. Basic MRI sequence_김채리.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/1. Basic MRI sequence.mp4")
+        touch(root, "08_Heart/2026-06 강좌F/5. The Thick myocardium_part I_강세리.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/5. The Thick myocardium_part I.mp4")
+        new7 = touch(root, "08_Heart/2026-06 강좌F/5. The Thick myocardium_part II.mp4")
+        touch(root, "08_Heart/2026-06 강좌F/2-1.Functrional anatomy.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/2-1.Functional anatomy.mp4")
+        touch(root, "08_Heart/2026-06 강좌F/Subaxial Cervical Spine Trauma.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/1-2.subaxial cervical spine trauma.mp4")
+        new8 = touch(root, "08_Heart/2026-06 강좌F/1-1.upper cervical spine trauma.mp4")
+        # one lecture per sub folder: video + any document there
+        touch(root, "08_Heart/2026-06 강좌F/03 k/03. k-space in MRI_Sjin.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/03 k/20220607_mr physics 3.mp4")
 
         todo, skipped = scan(root)
-        want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5, new6, new7))
+        want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5, new6, new7, new8))
         assert sorted(todo) == want, (todo, want)
         assert len(skipped) == 2, skipped
     print("autoscan tests passed")

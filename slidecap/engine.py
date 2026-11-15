@@ -752,17 +752,22 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     W, H = a.ww, a.wh
     if not (y >= H * 0.7 and y + h >= H * 0.9 and w <= W * 0.35 and h <= H * 0.22):
         return None
-    ra = sa[y:y + h, x:x + w]
-    rb = sb[y:y + h, x:x + w]
-    da = float((ra < 70).mean())
-    db = float((rb < 70).mean())
+    def dark(s, x0, y0, x1, y1):
+        return float((s[max(0, y0):min(H, y1), max(0, x0):min(W, x1)] < 70).mean())
+    # a small colored part of the box (avatar circle) is not dark itself but
+    # sits inside the dark box: also judge it with a thin ring around it
+    pad = min(w, h) // 2 + 3
+    da = max(dark(sa, x, y, x + w, y + h), dark(sa, x - pad, y - pad, x + w + pad, y + h + pad))
+    db = max(dark(sb, x, y, x + w, y + h), dark(sb, x - pad, y - pad, x + w + pad, y + h + pad))
     if max(da, db) < 0.45:
         return None
-    # the change may be only the text inside the box: find the top of the
-    # dark box first (rows that are mostly dark in either capture)
+    # the change may be only a part of the box (a text line, the avatar):
+    # find the top of the dark box first, looking a bit wider than the
+    # change; rows with text inside the box are still partly dark
+    xa, xb = max(0, x - pad), min(W, x + w + pad)
     top, lim = y, int(H * 0.6)
-    while top > lim and max(float((sa[top - 1, x:x + w] < 70).mean()),
-                            float((sb[top - 1, x:x + w] < 70).mean())) > 0.5:
+    while top > lim and max(float((sa[top - 1, xa:xb] < 70).mean()),
+                            float((sb[top - 1, xa:xb] < 70).mean())) > 0.35:
         top -= 1
     if top <= lim:
         return None
@@ -771,8 +776,8 @@ def _overlay_box(sa: np.ndarray, sb: np.ndarray, a: "_Analyzer", x, y, w, h):
     t = max(0, top - max(4, h // 4))
     if t >= top:
         return None
-    above_a = float((sa[t:top, x:x + w] < 70).mean())
-    above_b = float((sb[t:top, x:x + w] < 70).mean())
+    above_a = float((sa[t:top, xa:xb] < 70).mean())
+    above_b = float((sb[t:top, xa:xb] < 70).mean())
     if max(above_a, above_b) > 0.25:
         return None
     return da, db

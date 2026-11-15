@@ -10,6 +10,12 @@ Rules
   closer to the root uses its own folder.
 - A .pptx/.ppt that has the same name as a video in its folder is SlideCap's
   own output and does not count as lecture notes.
+- Documents whose name says they are a program, notice or table of contents
+  (프로그램, 안내, 목차, 일정, 시간표, program, schedule, agenda, ...) do not
+  count as lecture notes either.
+- A course folder containing a marker file named slidecap_변환.txt (or
+  slidecap_convert.txt) is converted even if it has lecture notes (for
+  courses whose notes cover only some of the lectures).
 """
 import os
 from typing import Dict, List, Optional
@@ -20,6 +26,22 @@ VIDEO_EXTS = {
 }
 HANDOUT_EXTS = {".pdf", ".ppt", ".pptx", ".pps", ".ppsx", ".key", ".doc", ".docx", ".hwp", ".hwpx"}
 DEFAULT_COURSE_DEPTH = 2
+NOT_HANDOUT_WORDS = ("프로그램", "안내", "목차", "일정", "시간표", "초청", "등록",
+                     "program", "schedule", "agenda", "timetable", "invitation", "brochure")
+FORCE_FILES = ("slidecap_변환.txt", "slidecap_convert.txt")
+
+
+def is_not_handout_name(name: str) -> bool:
+    n = name.lower()
+    return any(w in n for w in NOT_HANDOUT_WORDS)
+
+
+def has_force_marker(folder: str) -> bool:
+    try:
+        names = {f.lower() for f in os.listdir(folder)}
+    except OSError:
+        return False
+    return any(f.lower() in names for f in FORCE_FILES)
 
 
 def _skip_dir(name: str) -> bool:
@@ -50,6 +72,8 @@ def has_handout(folder: str) -> Optional[str]:
                 continue
             if ext in (".pptx", ".ppt") and stem.lower() in stems:
                 continue  # our own output
+            if is_not_handout_name(stem):
+                continue  # program / notice / contents, not lecture notes
             return os.path.join(d, f)
     return None
 
@@ -73,7 +97,7 @@ def scan(root: str, depth: int = DEFAULT_COURSE_DEPTH):
                 continue
             c = course_folder(v, root, depth)
             if c not in checked:
-                checked[c] = has_handout(c)
+                checked[c] = None if has_force_marker(c) else has_handout(c)
                 if checked[c]:
                     skipped[c] = checked[c]
             if checked[c]:

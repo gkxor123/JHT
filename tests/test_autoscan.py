@@ -35,8 +35,17 @@ def main():
         # video directly in a subspecialty folder: its own folder is the course
         new5 = touch(root, "06_H&N/loose.mp4")
 
+        # program / notice PDF is not a handout
+        touch(root, "07_INT/2026-05 강좌E/2026 연수강좌 프로그램.pdf")
+        touch(root, "07_INT/2026-05 강좌E/안내장_ver. June.PDF")
+        new6 = touch(root, "07_INT/2026-05 강좌E/1강.mp4")
+        # handout for some lectures only, but the user asked to convert
+        touch(root, "08_Heart/2026-06 강좌F/1. Basic MRI.pdf")
+        touch(root, "08_Heart/2026-06 강좌F/slidecap_변환.txt")
+        new7 = touch(root, "08_Heart/2026-06 강좌F/2강.mp4")
+
         todo, skipped = scan(root)
-        want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5))
+        want = sorted(os.path.abspath(p) for p in (new1, new2, new3, new4, new5, new6, new7))
         assert sorted(todo) == want, (todo, want)
         assert len(skipped) == 2, skipped
     print("autoscan tests passed")

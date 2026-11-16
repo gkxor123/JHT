@@ -1,5 +1,7 @@
 # SlideCap — 강의 영상 → PPT 슬라이드 자동 캡처
 
+> 같은 저장소의 **PPT2PDF**(PPT 여러 개 → PDF 일괄 변환)는 [`ppt2pdf/README.md`](ppt2pdf/README.md)를 보세요.
+
 연수강좌처럼 PPT를 띄워 놓고 강의하는 영상에서, 사용자가 지정한 **PPT 화면 영역**만
 슬라이드가 바뀔 때마다 자동으로 캡처해 **.pptx 파일**로 만들어 줍니다.
 

@@ -3,7 +3,7 @@ name: Build Windows exe
 on:
   push:
     branches: ["**"]
-    paths-ignore: ["**.md"]
+    paths-ignore: ["**.md", "ppt2pdf/**", ".github/workflows/build-ppt2pdf.yml"]
   workflow_dispatch:
 
 jobs:

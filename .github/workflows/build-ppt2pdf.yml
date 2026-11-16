@@ -1,0 +1,71 @@
+name: Build PPT2PDF exe
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["ppt2pdf/**", ".github/workflows/build-ppt2pdf.yml", "!ppt2pdf/**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # publish the exe as a GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: ppt2pdf
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.22.3
+
+      # runners have no PowerPoint: the LibreOffice engine is what gets tested here
+      - name: Install LibreOffice
+        run: choco install libreoffice-fresh -y --no-progress
+
+      - name: Conversion test (Korean paths)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $env:PPT2PDF_TEST_DIR = Join-Path $env:RUNNER_TEMP "피피티 테스트"
+          python tests/test_convert.py --engine libreoffice
+          if ($LASTEXITCODE -ne 0) { throw "conversion test failed" }
+
+      - name: Build exe
+        run: pyinstaller --noconfirm PPT2PDF.spec
+
+      - name: Test the packaged exe
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $env:PPT2PDF_TEST_DIR = Join-Path $env:RUNNER_TEMP "exe 테스트"
+          python tests/test_convert.py --engine auto --exe dist\PPT2PDF.exe
+          $code = $LASTEXITCODE
+          Get-Content (Join-Path $env:USERPROFILE "ppt2pdf_cli.log") -ErrorAction SilentlyContinue
+          if ($code -ne 0) { throw "exe test failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PPT2PDF-windows
+          path: ppt2pdf/dist/PPT2PDF.exe
+          if-no-files-found: error
+
+      - name: Publish release (direct download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ppt2pdf-latest --yes --cleanup-tag 2>$null
+          $global:LASTEXITCODE = 0
+          gh release create ppt2pdf-latest dist\PPT2PDF.exe --target $env:GITHUB_SHA `
+            --title "PPT2PDF (최신)" `
+            --notes "PPT/PPTX 여러 개를 한 번에 PDF로 변환합니다. PPT2PDF.exe를 받아 바로 실행하세요. (branch: $env:GITHUB_REF_NAME, commit: $env:GITHUB_SHA)"

@@ -812,7 +812,7 @@ class App(_BaseTk):
             except Exception as e:
                 q.put(("row", p, "오류"))
                 q.put(("log", "오류: %s\n%s" % (name, "".join(traceback.format_exception_only(type(e), e)).strip())))
-                q.put(("trace", traceback.format_exc()))
+                q.put(("trace", "file: %s\n%s" % (p, traceback.format_exc())))
         q.put(("done",))
 
     def _poll(self):

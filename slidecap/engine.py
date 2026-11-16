@@ -158,6 +158,48 @@ def _open(path: str):
     return container, stream
 
 
+MAX_BAD_PACKETS = 3000   # give up only if the damage never ends
+
+
+def _frames(container, stream, stats: Optional[dict] = None):
+    """Decode ``stream`` frame by frame, skipping damaged packets.
+
+    ``container.decode`` stops at the first broken packet ("Invalid data
+    found when processing input"), which threw away whole lectures whose
+    file had one damaged spot.  Here a packet that fails to demux or decode
+    is skipped; the decoder recovers at the next key frame.  Only a file
+    that never decodes again (MAX_BAD_PACKETS in a row) raises.
+    """
+    bad_run = 0
+    it = container.demux(stream)
+    while True:
+        try:
+            packet = next(it)
+        except StopIteration:
+            return
+        except av.error.EOFError:
+            return
+        except av.error.FFmpegError:
+            bad_run += 1
+            if stats is not None:
+                stats["bad"] = stats.get("bad", 0) + 1
+            if bad_run > MAX_BAD_PACKETS:
+                raise
+            continue
+        try:
+            frames = packet.decode()
+        except av.error.FFmpegError:
+            bad_run += 1
+            if stats is not None:
+                stats["bad"] = stats.get("bad", 0) + 1
+            if bad_run > MAX_BAD_PACKETS:
+                raise
+            continue
+        for frame in frames:
+            bad_run = 0
+            yield frame
+
+
 def video_info(path: str) -> dict:
     container, stream = _open(path)
     try:
@@ -183,7 +225,7 @@ def frame_at(path: str, t: float) -> np.ndarray:
             except Exception:
                 pass
         last = None
-        for frame in container.decode(stream):
+        for frame in _frames(container, stream):
             last = frame
             ft = frame.time
             if ft is None or ft >= t - 0.02:
@@ -424,7 +466,7 @@ def detect_slides(
     sample_idx = 0
 
     try:
-        for frame in container.decode(stream):
+        for frame in _frames(container, stream):
             frame_idx += 1
             t = frame.time
             if t is None:

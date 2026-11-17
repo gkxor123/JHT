@@ -91,15 +91,67 @@ def ocr_languages() -> List[str]:
         return []
 
 
-def default_language(langs: Sequence[str]) -> Optional[str]:
-    for pref in ("ko",):          # Korean OCR also reads the Latin alphabet
-        for l in langs:
-            if l.lower().startswith(pref):
-                return l
+AUTO = "auto"     # English first, Korean OCR for the lines that hold Hangul
+
+
+def _pick(langs: Sequence[str], prefix: str) -> Optional[str]:
     for l in langs:
-        if l.lower().startswith("en"):
+        if l.lower().startswith(prefix):
             return l
-    return langs[0] if langs else None
+    return None
+
+
+def default_language(langs: Sequence[str]) -> Optional[str]:
+    return AUTO if langs else None
+
+
+def describe(mode: str, langs: Sequence[str]) -> str:
+    if mode != AUTO:
+        return mode
+    en, ko = _pick(langs, "en"), _pick(langs, "ko")
+    if en and ko:
+        return "%s+%s" % (en, ko)
+    return en or ko or (langs[0] if langs else "")
+
+
+def _hangul_ratio(s: str) -> float:
+    letters = [c for c in s if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if "가" <= c <= "힣" or "ㄱ" <= c <= "ㆎ") / len(letters)
+
+
+def _line_box(line: Sequence[Word]):
+    x0 = min(w[1] for w in line); y0 = min(w[2] for w in line)
+    x1 = max(w[1] + w[3] for w in line); y1 = max(w[2] + w[4] for w in line)
+    return x0, y0, x1, y1
+
+
+def _overlap(a, b) -> float:
+    """Part of box ``a`` covered by box ``b``."""
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    area = max((a[2] - a[0]) * (a[3] - a[1]), 1e-6)
+    return ix * iy / area
+
+
+def merge_lines(en: List[List[Word]], ko: List[List[Word]]) -> List[List[Word]]:
+    """English lines, except where the Korean engine found Hangul: there the
+    Korean line replaces the English lines it covers (the English engine
+    turns Hangul into junk, the Korean engine misspells English)."""
+    kor = [l for l in ko if _hangul_ratio("".join(w[0] for w in l)) >= 0.3]
+    if not kor:
+        return en
+    kb = [_line_box(l) for l in kor]
+    keep = []
+    for l in en:
+        b = _line_box(l)
+        if any(_overlap(b, k) > 0.5 or _overlap(k, b) > 0.5 for k in kb):
+            continue
+        keep.append(l)
+    out = keep + kor
+    out.sort(key=lambda l: (_line_box(l)[1], _line_box(l)[0]))
+    return out
 
 
 class WindowsOcr:
@@ -111,33 +163,35 @@ class WindowsOcr:
         except Exception as e:  # pragma: no cover
             raise OcrUnavailable("Windows OCR을 불러오지 못했습니다: %s" % e)
         langs = [l.language_tag for l in OcrEngine.available_recognizer_languages]
-        lang = lang or default_language(langs)
-        if not lang:
+        if not langs:
             raise OcrUnavailable(
                 "이 PC에 Windows OCR 언어가 없습니다.\n"
-                "설정 → 시간 및 언어 → 언어 및 지역에서 한국어(또는 English) 언어 팩을 설치하세요.")
-        eng = OcrEngine.try_create_from_language(Language(lang))
-        if eng is None:
-            raise OcrUnavailable("OCR 언어 '%s'를 쓸 수 없습니다." % lang)
-        self.engine = eng
-        self.lang = lang
+                "설정 → 시간 및 언어 → 언어 및 지역에서 English(또는 한국어)를 추가하세요.")
+        lang = lang or AUTO
+        if lang == AUTO:
+            en, ko = _pick(langs, "en"), _pick(langs, "ko")
+            tags = [t for t in (en, ko) if t] or [langs[0]]
+        else:
+            tags = [lang]
+        self.engines = []
+        for t in tags:
+            eng = OcrEngine.try_create_from_language(Language(t))
+            if eng is None:
+                raise OcrUnavailable("OCR 언어 '%s'를 쓸 수 없습니다." % t)
+            self.engines.append((t, eng))
+        self.lang = "+".join(tags)
+        self.english = any(t.lower().startswith("en") for t in tags)
         try:
             self.max_dim = int(OcrEngine.max_image_dimension)
         except Exception:
             self.max_dim = 10000
         self.loop = asyncio.new_event_loop()
 
-    async def _rec(self, bmp):
-        return await self.engine.recognize_async(bmp)
+    async def _rec(self, eng, bmp):
+        return await eng.recognize_async(bmp)
 
-    def recognize(self, gray: bytes, w: int, h: int) -> List[List[Word]]:
-        from winrt.windows.storage.streams import DataWriter
-        from winrt.windows.graphics.imaging import SoftwareBitmap, BitmapPixelFormat
-        dw = DataWriter()
-        dw.write_bytes(gray)
-        buf = dw.detach_buffer()
-        bmp = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.GRAY8, w, h)
-        res = self.loop.run_until_complete(self._rec(bmp))
+    def _run(self, eng, bmp) -> List[List[Word]]:
+        res = self.loop.run_until_complete(self._rec(eng, bmp))
         lines = []
         for line in res.lines:
             ws = []
@@ -147,6 +201,18 @@ class WindowsOcr:
             if ws:
                 lines.append(ws)
         return lines
+
+    def recognize(self, gray: bytes, w: int, h: int) -> List[List[Word]]:
+        from winrt.windows.storage.streams import DataWriter
+        from winrt.windows.graphics.imaging import SoftwareBitmap, BitmapPixelFormat
+        dw = DataWriter()
+        dw.write_bytes(gray)
+        buf = dw.detach_buffer()
+        bmp = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.GRAY8, w, h)
+        results = [self._run(eng, bmp) for _, eng in self.engines]
+        if len(results) == 2:
+            return merge_lines(results[0], results[1])
+        return results[0]
 
     def close(self):
         try:

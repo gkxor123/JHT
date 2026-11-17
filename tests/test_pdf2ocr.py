@@ -14,13 +14,14 @@ import tempfile
 import pymupdf as fitz
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pdf2ocr.core import (WindowsOcr, list_pdfs, ocr_languages, page_has_text,  # noqa: E402
-                          process_pdf)
+from pdf2ocr.core import (WindowsOcr, list_pdfs, merge_lines, ocr_languages,  # noqa: E402
+                          page_has_text, process_pdf)
 
 PW, PH = 960, 540
 LINES = [("Myocarditis and late gadolinium enhancement", 60, 120, 34),
          ("심근병증 영상 소견 정리", 60, 220, 40),
-         ("Cardiac MRI protocol for cardiomyopathy", 60, 320, 30)]
+         ("Cardiac MRI protocol for cardiomyopathy", 60, 320, 30),
+         ("Pulmonary embolism: filling defect in segmental arteries", 60, 400, 20)]
 FONT = fitz.Font("cjk")
 
 
@@ -30,7 +31,7 @@ def make_pdf(path):
     tw = fitz.TextWriter(pg.rect)
     for text, x, y, fs in LINES:
         tw.append((x, y), text, font=FONT, fontsize=fs)
-    pg.draw_rect(fitz.Rect(600, 380, 900, 510), color=(0.2, 0.2, 0.6), fill=(0.8, 0.85, 1))
+    pg.draw_rect(fitz.Rect(600, 430, 900, 520), color=(0.2, 0.2, 0.6), fill=(0.8, 0.85, 1))
     tw.write_text(pg)
     pix = pg.get_pixmap(matrix=fitz.Matrix(2, 2))
     out = fitz.open()
@@ -114,6 +115,15 @@ def main():
           "new-file mode keeps the original")
     check(process_pdf(f2, FakeOcr(), new_file=True).status == "exists", "existing _ocr file is not overwritten")
 
+    # ---- English/Korean merge ----
+    en = [[("Cardiac", 10, 10, 80, 20), ("MRI", 95, 10, 40, 20)],
+          [("A@#", 10, 50, 120, 22)]]                              # Hangul read by the English engine
+    ko = [[("Cardiac", 10, 10, 80, 20), ("얜RI", 95, 10, 40, 20)],
+          [("심근병증", 10, 50, 120, 22)]]
+    m = merge_lines(en, ko)
+    check([[w[0] for w in l] for l in m] == [["Cardiac", "MRI"], ["심근병증"]],
+          "merge keeps English lines and takes Korean lines (%s)" % m)
+
     # ---- real Windows OCR ----
     langs = ocr_languages()
     print("Windows OCR languages:", langs)
@@ -127,10 +137,15 @@ def main():
             t = doc[0].get_text("text")
         print("      OCR (%s) text: %r" % (ocr.lang, " ".join(t.split())[:300]))
         low = t.lower()
-        found = [w for w in ("myocarditis", "gadolinium", "enhancement", "cardiac", "protocol", "cardiomyopathy")
-                 if w in low]
-        check(len(found) >= 4, "real OCR reads the English words (%s)" % found)
-        if ocr.lang.lower().startswith("ko"):
+        words = ("myocarditis", "gadolinium", "enhancement", "cardiac", "protocol", "cardiomyopathy",
+                 "pulmonary", "embolism", "filling", "defect", "segmental", "arteries")
+        found = [w for w in words if w in low]
+        if ocr.english:
+            check(len(found) == len(words), "English OCR reads every English word (%d/%d, missing %s)" % (
+                len(found), len(words), [w for w in words if w not in found]))
+        else:
+            check(len(found) >= 6, "real OCR reads the English words (%s)" % found)
+        if "ko" in ocr.lang.lower():
             check("심근병증" in t.replace(" ", ""), "real OCR reads Korean")
         check(render(f3, 0) == before[0], "real OCR page looks the same")
     else:

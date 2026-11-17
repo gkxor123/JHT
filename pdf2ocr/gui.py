@@ -11,10 +11,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .core import (Cancelled, OcrUnavailable, WindowsOcr, default_language,
+from .core import (AUTO, Cancelled, OcrUnavailable, WindowsOcr, default_language,
                    list_pdfs, ocr_languages, process_pdf)
 
 APP_TITLE = "pdf2ocr - PDF 글자 검색(Ctrl+F) 만들기 %s" % __version__
+AUTO_LABEL = "영어 우선 + 한글 (추천)"
 
 try:  # optional drag & drop support
     from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
@@ -115,13 +116,22 @@ class App(_BaseTk):
                         variable=self.force).grid(row=2, column=0, columnspan=3, sticky="w")
         ttk.Label(opt, text="OCR 언어:").grid(row=3, column=0, sticky="w", pady=(4, 0))
         self.langs = ocr_languages()
-        self.lang = tk.StringVar(value=default_language(self.langs) or "")
-        cb = ttk.Combobox(opt, textvariable=self.lang, values=self.langs, width=10, state="readonly")
+        self.lang_map = {}
+        if self.langs:
+            self.lang_map[AUTO_LABEL] = AUTO
+        for l in self.langs:
+            self.lang_map["%s만" % l] = l
+        self.lang = tk.StringVar(value=AUTO_LABEL if self.langs else "")
+        cb = ttk.Combobox(opt, textvariable=self.lang, values=list(self.lang_map), width=22, state="readonly")
         cb.grid(row=3, column=1, sticky="w", pady=(4, 0))
-        note = "(한국어 ko는 영어 알파벳도 함께 읽습니다)" if self.langs else \
-            "이 PC에 OCR 언어가 없습니다 - Windows 설정에서 한국어/English 언어 팩 설치 필요"
-        ttk.Label(opt, text=note, foreground="#555" if self.langs else "#c00").grid(
-            row=3, column=2, sticky="w", pady=(4, 0))
+        has_en = any(l.lower().startswith("en") for l in self.langs)
+        if not self.langs:
+            note, color = "이 PC에 OCR 언어가 없습니다 - Windows 설정에서 English 언어 추가 필요", "#c00"
+        elif not has_en:
+            note, color = "영어 OCR 없음 → 영어 정확도 낮음. 설정에서 English(미국) 추가 권장", "#c00"
+        else:
+            note, color = "(영어로 읽고, 한글이 있는 줄만 한국어로 읽습니다)", "#555"
+        ttk.Label(opt, text=note, foreground=color).grid(row=3, column=2, sticky="w", pady=(4, 0))
 
         run = ttk.Frame(self, padding=(8, 4))
         run.pack(fill="x")
@@ -202,7 +212,7 @@ class App(_BaseTk):
         self.cancel_btn.config(state="normal")
         for f in files:
             self.tree.set(f, "status", "대기")
-        opts = (self.lang.get(), self.new_file.get(), self.force.get())
+        opts = (self.lang_map.get(self.lang.get(), AUTO), self.new_file.get(), self.force.get())
         self.worker = threading.Thread(target=self._work, args=(files, opts), daemon=True)
         self.worker.start()
 

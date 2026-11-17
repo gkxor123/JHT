@@ -3,7 +3,7 @@ name: Build Windows exe
 on:
   push:
     branches: ["**"]
-    paths-ignore: ["**.md"]
+    paths-ignore: ["**.md", "pdf2ocr/**", "pdf2ocr_main.py", "pdf2ocr.spec", "tests/test_pdf2ocr.py", ".github/workflows/build-pdf2ocr.yml"]
   workflow_dispatch:
 
 jobs:

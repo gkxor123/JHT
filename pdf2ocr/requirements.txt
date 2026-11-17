@@ -1,0 +1,9 @@
+pymupdf>=1.26,<1.28
+tkinterdnd2==0.7.0
+winrt-runtime>=3.0,<4
+winrt-Windows.Foundation>=3.0,<4
+winrt-Windows.Foundation.Collections>=3.0,<4
+winrt-Windows.Globalization>=3.0,<4
+winrt-Windows.Graphics.Imaging>=3.0,<4
+winrt-Windows.Media.Ocr>=3.0,<4
+winrt-Windows.Storage.Streams>=3.0,<4

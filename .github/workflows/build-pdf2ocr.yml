@@ -1,0 +1,80 @@
+name: Build pdf2ocr exe
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["pdf2ocr/**", "pdf2ocr_main.py", "pdf2ocr.spec", "tests/test_pdf2ocr.py", ".github/workflows/build-pdf2ocr.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pdf2ocr/requirements.txt pyinstaller==6.22.3
+
+      - name: Add Windows OCR languages (for the real-OCR test)
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          foreach ($n in "Language.OCR~~~en-US~0.0.1.0", "Language.OCR~~~ko-KR~0.0.1.0") {
+            try { Add-WindowsCapability -Online -Name $n | Out-Null; "added $n" } catch { "could not add ${n}: $_" }
+          }
+
+      - name: Test (Korean folder names)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "pdf 테스트"
+          $out = & python tests/test_pdf2ocr.py $dir 2>&1 | ForEach-Object { "$_" }
+          $out
+          $msg = (($out | Select-Object -Last 40) -join "%0A") -replace "::", ": :"
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=test_pdf2ocr::$msg"; exit 1 }
+          Write-Output "::notice title=test_pdf2ocr::$msg"
+
+      - name: Build exe
+        run: pyinstaller --noconfirm pdf2ocr.spec
+
+      - name: Test the packaged exe
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP "pdf 테스트\강의록 OCR 테스트\하위 폴더"
+          $src = Join-Path $d "심장 강의록.pdf"
+          $t = Join-Path $env:RUNNER_TEMP "exe 테스트"
+          New-Item -ItemType Directory -Force $t | Out-Null
+          Copy-Item $src (Join-Path $t "강의록.pdf")
+          $langs = python -c "from pdf2ocr.core import ocr_languages; print(len(ocr_languages()))"
+          if ([int]$langs -gt 0) {
+            $p = Start-Process -FilePath "dist\pdf2ocr.exe" -Wait -PassThru -ArgumentList @("--cli", "`"$t`"")
+            Get-Content (Join-Path $env:USERPROFILE "pdf2ocr_cli.log") -ErrorAction SilentlyContinue
+            if ($p.ExitCode -ne 0) { Write-Output "::error title=exe::cli exit $($p.ExitCode)"; throw "exe failed" }
+            $txt = Join-Path $t "text.txt"
+            $p = Start-Process -FilePath "dist\pdf2ocr.exe" -Wait -PassThru -ArgumentList @("--dump-text", "`"$(Join-Path $t '강의록.pdf')`"", "`"$txt`"")
+            $s = Get-Content $txt -Raw -Encoding utf8
+            $s
+            if ($s -notmatch "(?i)cardiac|myocarditis") { Write-Output "::error title=exe::no OCR text in exe output"; throw "no text" }
+            Write-Output "::notice title=exe::packaged exe OCR ok"
+          } else {
+            $p = Start-Process -FilePath "dist\pdf2ocr.exe" -Wait -PassThru -ArgumentList @("--dump-text", "`"$src`"", "`"$(Join-Path $t 'text.txt')`"")
+            if ($p.ExitCode -ne 0) { throw "exe failed" }
+            Write-Output "::warning title=exe::no OCR language on runner; exe OCR not tested"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdf2ocr-windows
+          path: dist/pdf2ocr.exe
+          if-no-files-found: error

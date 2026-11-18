@@ -107,6 +107,7 @@ def run(name, workdir):
     problems = []
     hits = [0] * len(uniq)
     rows = []
+    image_best = []      # best match by picture only (no capture-time preference)
     for c in caps:
         g = gray_small(c.image)
         best, best_err, best_bad = None, 1e9, 1.0
@@ -128,6 +129,7 @@ def run(name, workdir):
             errs[i] = (err, float((d > 60).mean()))
             if err < best_err:
                 best, best_err, best_bad = i, err, float((d > 60).mean())
+        image_best.append(best)
         lim_err, lim_bad = (4.0, 0.0006) if not cfg.get("shake") else (6.0, 0.01)
         if cfg.get("tilt"):
             lim_bad = 0.02      # the room margin kept around the screen adds ~1%
@@ -181,6 +183,15 @@ def run(name, workdir):
             problems.append("MISSING bullet slide (neither last nor second-to-last step)")
         if hits[i2c] + hits[i2d] > 2:
             problems.append("bullet slide captured %d times" % (hits[i2c] + hits[i2d]))
+        # a small arrow added: the two steps may be merged into one capture
+        # as long as the arrow is in it (the picture, not the noted time)
+        i12a = next(i for i, u in enumerate(uniq) if u["slide"] is mtv.S12a)
+        i12b = next(i for i, u in enumerate(uniq) if u["slide"] is mtv.S12b)
+        problems = [p for p in problems if ("slide %d " % i12b) not in p and ("slide %d " % i12a) not in p]
+        if i12b not in image_best:
+            problems.append("MISSING arrow (no capture shows slide %d)" % i12b)
+        if hits[i12a] + hits[i12b] > 2:
+            problems.append("arrow slide captured %d times" % (hits[i12a] + hits[i12b]))
         # the three quick slides differ by one or two letters only: any of
         # them may stand for another, but at least one must be there and
         # none may be saved more often than the three are shown

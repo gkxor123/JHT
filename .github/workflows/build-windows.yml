@@ -1,5 +1,11 @@
 name: Build Windows exe
 
+# Two kinds of jobs run side by side:
+#  * build  - makes SlideCap.exe right away (about 10 minutes) with a quick
+#             check of the packaged exe, and uploads it (SlideCap-windows)
+#  * test   - the long accuracy tests, split into three groups that run at
+#             the same time.  A red test run means: check before using the exe.
+
 on:
   push:
     branches: ["**"]
@@ -10,7 +16,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     defaults:
       run:
         shell: pwsh
@@ -26,34 +32,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller==6.22.3
 
-      - name: Accuracy test on Windows (Korean folder name)
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
-          $fail = 0
-          foreach ($t in "tests/test_autoscan.py", "tests/test_autoregion.py", "tests/test_overlay.py", "tests/test_cursor_merge.py", "tests/test_engine.py", "tests/test_damaged_video.py", "tests/test_real_samples.py") {
-            $out = & python $t 2>&1 | ForEach-Object { "$_" }
-            $out
-            if ($LASTEXITCODE -ne 0) {
-              $fail = 1
-              # failure details as a public annotation (job logs need sign-in)
-              $msg = (($out | Select-Object -Last 40) -join "%0A") -replace "::", ": :"
-              Write-Output "::error title=$t::$msg"
-            }
-          }
-          if ($fail) { exit 1 }
-
       - name: Build exe
         run: pyinstaller --noconfirm SlideCap.spec
 
-      - name: Test the packaged exe
+      - name: Test the packaged exe (Korean folder name)
         env:
           PYTHONIOENCODING: utf-8
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
+          New-Item -ItemType Directory -Force $dir | Out-Null
           $video = Join-Path $dir "연수강좌 1강.mp4"
-          Copy-Item (Join-Path $dir "basic.mp4") $video
+          python tests/make_test_video.py $video
           $out = Join-Path $dir "exe 결과"
           $p = Start-Process -FilePath "dist\SlideCap.exe" -Wait -PassThru `
                -ArgumentList @("--cli", "`"$video`"", "--roi", "40,60,960,540", "--out", "`"$out`"")
@@ -68,3 +57,51 @@ jobs:
           name: SlideCap-windows
           path: dist/SlideCap.exe
           if-no-files-found: error
+
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - name: online
+            cmd: "tests/test_engine.py basic hd_lowquality webcam_in_slide webcam_excluded keep_build_steps"
+          - name: camera
+            cmd: "tests/test_engine.py camera_shake camera_shake_strong camera_tilted camera_audience"
+          - name: real-and-rules
+            cmd: "tests/test_real_samples.py;tests/test_autoscan.py;tests/test_autoregion.py;tests/test_overlay.py;tests/test_cursor_merge.py;tests/test_damaged_video.py"
+    name: test (${{ matrix.group.name }})
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Accuracy test on Windows (Korean folder name)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $env:SLIDECAP_TEST_DIR = Join-Path $env:RUNNER_TEMP "슬라이드 테스트"
+          $fail = 0
+          foreach ($t in "${{ matrix.group.cmd }}".Split(";")) {
+            $parts = $t.Trim().Split(" ")
+            $out = & python @parts 2>&1 | ForEach-Object { "$_" }
+            $out
+            if ($LASTEXITCODE -ne 0) {
+              $fail = 1
+              # failure details as a public annotation (job logs need sign-in)
+              $msg = (($out | Select-Object -Last 40) -join "%0A") -replace "::", ": :"
+              Write-Output "::error title=$($parts[0])::$msg"
+            }
+          }
+          if ($fail) { exit 1 }

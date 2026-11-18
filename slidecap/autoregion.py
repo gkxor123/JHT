@@ -69,7 +69,71 @@ def _grow(med: np.ndarray, x0: int, y0: int, x1: int, y1: int):
 
 
 def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, str]:
-    """frames: gray uint8 arrays of the same size (~320-640 px wide)."""
+    """frames: gray uint8 arrays of the same size (~320-640 px wide).
+
+    The region found is finally widened so that it holds the slide changes
+    of (nearly) all sampled slide flips: a slide that uses the edges only
+    now and then must not be cut (a slightly wider region costs nothing)."""
+    roi, conf, why = _detect_region(frames)
+    if roi is not None:
+        st = np.stack([f.astype(np.int16) for f in frames])
+        D = np.abs(np.diff(st, axis=0)) > DIFF
+        roi = _cover_flips(D, roi)
+    return roi, conf, why
+
+
+def _cover_flips(D: np.ndarray, roi: Rect, share: float = 0.9) -> Rect:
+    """Widen ``roi`` so that it contains the changed area of ``share`` of the
+    slide flips seen in the samples (never shrinks it).
+
+    D: (steps, H, W) change masks between consecutive samples.  Pixels that
+    change most of the time (webcam, audience, a playing video) are left
+    out, so only slide content counts."""
+    steps, H, W = D.shape
+    x, y, w, h = roi
+    # slide flips: steps where the region itself changes clearly
+    flips = D[:, y:y + h, x:x + w].mean(axis=(1, 2)) >= 0.01
+    # where things move all the time (webcam, audience, a playing video).
+    # Only areas outside the region matter here, and the slide's own outer
+    # parts are by definition used only now and then, so "often" is enough.
+    # A swaying person: spread the area a little.
+    busy = D.mean(axis=0) > 0.25
+    if (~flips).sum() >= 5:
+        busy |= D[~flips].mean(axis=0) > 0.25
+    busy = _box_blur(busy.astype(np.float64), max(5, W // 40) | 1) > 0.02
+    # look around the region, not across the whole picture
+    mx, my = int(max(w * 0.5, W * 0.1)), int(max(h * 0.5, H * 0.1))
+    X0, Y0, X1, Y1 = max(0, x - mx), max(0, y - my), min(W, x + w + mx), min(H, y + h + my)
+    keep = ~busy[Y0:Y1, X0:X1]
+    ext = []
+    for k in np.nonzero(flips)[0]:
+        m = D[k, Y0:Y1, X0:X1] & keep
+        cols, rows = m.sum(axis=0), m.sum(axis=1)
+        # ignore stray single pixels (noise): a column/row needs a few
+        cols = np.where(cols >= 3, cols, 0); rows = np.where(rows >= 3, rows, 0)
+        if cols.sum() == 0 or rows.sum() == 0:
+            continue
+        a, b = _quantile_span(cols, 0.003)
+        c, d = _quantile_span(rows, 0.003)
+        ext.append((X0 + a, Y0 + c, X0 + b, Y0 + d))
+    if len(ext) < 3:
+        return roi
+    e = np.array(ext, np.float64)
+    q = (1.0 - share) * 100
+    ex0, ey0 = np.percentile(e[:, 0], q), np.percentile(e[:, 1], q)
+    ex1, ey1 = np.percentile(e[:, 2], 100 - q), np.percentile(e[:, 3], 100 - q)
+    nx0, ny0 = min(x, int(ex0)), min(y, int(ey0))
+    nx1, ny1 = max(x + w, int(np.ceil(ex1))), max(y + h, int(np.ceil(ey1)))
+    if (nx0, ny0, nx1, ny1) == (x, y, x + w, y + h):
+        return roi
+    # a little room around what was seen
+    px, py = int(round(0.015 * (nx1 - nx0))), int(round(0.015 * (ny1 - ny0)))
+    nx0, ny0 = max(0, nx0 - px), max(0, ny0 - py)
+    nx1, ny1 = min(W, nx1 + px), min(H, ny1 + py)
+    return (int(nx0), int(ny0), int(nx1 - nx0), int(ny1 - ny0))
+
+
+def _detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, str]:
     if len(frames) < 6:
         return None, "low", "too few frames"
     st = np.stack([f.astype(np.int16) for f in frames])

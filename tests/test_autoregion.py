@@ -62,6 +62,24 @@ def main():
     ok = roi is None and conf == "low"
     print("%-26s -> %s %s (%s)  %s" % ("static video", roi, conf, why, "ok" if ok else "FAIL"))
     bad += not ok
+    # a region found too tight is widened to hold ~90% of the slide flips;
+    # a webcam that moves all the time next to it is not taken in
+    from slidecap.autoregion import _cover_flips
+    slide, cam = (100, 50, 300, 180), (20, 60, 60, 60)
+    D = np.zeros((60, H, W), bool)
+    r2 = np.random.default_rng(1)
+    for k in range(60):
+        wide = k % 5 == 0                       # 1 flip in 5 uses the edges
+        m = 4 if wide else 60
+        sx, sy, sw, sh = slide
+        D[k, sy + m // 2:sy + sh - m // 2, sx + m:sx + sw - m] = r2.random((sh - m, sw - 2 * m)) < 0.3
+        cx, cy, cw, ch_ = cam
+        D[k, cy:cy + ch_, cx:cx + cw] = r2.random((ch_, cw)) < 0.9   # moves all the time
+    tight = (160, 80, 180, 120)
+    got = _cover_flips(D, tight)
+    ok = got[0] <= slide[0] + 6 and got[0] + got[2] >= slide[0] + slide[2] - 6 and got[0] > cam[0] + cam[2]
+    print("%-26s -> %s from %s  %s" % ("widen to cover flips", got, tight, "ok" if ok else "FAIL"))
+    bad += not ok
     print("autoregion tests %s" % ("passed" if not bad else "FAILED (%d)" % bad))
     sys.exit(1 if bad else 0)
 

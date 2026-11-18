@@ -883,16 +883,22 @@ def detect_slides(
             # changes much larger than a pointer (fast GIF objects / video,
             # which the median removes just like a cursor)
             motion = a.diff(clean, clean_prev)
-            if s.stabilize and len(raws) >= 2:
+            if len(raws) >= 2:
                 rm = a.diff(raw, raws[-2])
                 if rm.mean() < 0.03:            # no slide flip in this step
                     # only big moving things (people); a cursor or laser
                     # dot is small and must not teach "audience" areas
-                    big = np.zeros_like(rm)
-                    ptr_big = 3.0 * (a.ww * 0.035) * (a.ww * 0.045)
-                    for x_, y_, w_, h_, ar_ in a.blobs(rm):
-                        if ar_ >= ptr_big:
-                            big[y_:y_ + h_, x_:x_ + w_] |= rm[y_:y_ + h_, x_:x_ + w_]
+                    if s.stabilize:
+                        big = np.zeros_like(rm)
+                        ptr_big = 3.0 * (a.ww * 0.035) * (a.ww * 0.045)
+                        for x_, y_, w_, h_, ar_ in a.blobs(rm):
+                            if ar_ >= ptr_big:
+                                big[y_:y_ + h_, x_:x_ + w_] |= rm[y_:y_ + h_, x_:x_ + w_]
+                    else:
+                        # screen recording: a video panel's changes are small
+                        # (a face, a speaker icon); zones are kept only where
+                        # they touch the region's edge, which a cursor rarely does
+                        big = rm
                     still_motion += big
                     still_n += 1
                     blk = cv2.resize(big.astype(np.float32), (a.bw, a.bh), interpolation=cv2.INTER_AREA) > 0.02
@@ -1096,8 +1102,10 @@ def detect_slides(
     sig = None
     if ptr_sigs:
         sig = tuple(np.percentile(np.array([v for _, v in ptr_sigs]), 75, axis=0))
-    if s.stabilize and still_n >= 20:
-        a.audience = _audience_zone(still_motion / still_n, a)
+    if still_n >= 20:
+        # screen recording: only areas at the region's edge (a meeting
+        # app's video panel); a GIF inside the slide must stay visible
+        a.audience = _audience_zone(still_motion / still_n, a, border_only=not s.stabilize)
         if debug and a.audience is not None:
             debug("audience zone %.1f%% of the region" % (a.audience.mean() * 100))
     captures = merge_captures(captures, a, s, sig, debug)
@@ -1133,6 +1141,10 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
     m = a.diff_aligned(p.small, c.small) & (1 - excl)
     if not m.any():
         return "pointer", False
+    if m.mean() > 0.2:
+        # a fifth of the slide or more changed: a new slide, not a build
+        # step (a full picture on a white slide is not "added text")
+        return "different", True
     md = cv2.dilate(m, a.kernel)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
     if sig is None:  # typical cursor size relative to the analysed width
@@ -1399,12 +1411,13 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
     return title < 0.004, keep_c
 
 
-def _moving_between(a: "_Analyzer", t0: float, t1: float) -> Optional[np.ndarray]:
+def _moving_between(a: "_Analyzer", t0: float, t1: float,
+                    border_only: bool = False) -> Optional[np.ndarray]:
     """Blocks that kept moving between times t0 and t1 while the slide
     stayed (people in front of the screen at that moment)."""
     if not a.motion_log:
         return None
-    lo, hi = min(t0, t1) - 2.0, max(t0, t1) + 4.0
+    lo, hi = min(t0, t1) - (0.0 if border_only else 2.0), max(t0, t1) + 4.0
     n = a.bw * a.bh
     acc = None
     cnt = 0
@@ -1420,6 +1433,8 @@ def _moving_between(a: "_Analyzer", t0: float, t1: float) -> Optional[np.ndarray
     out = np.zeros_like(zone)
     for i in range(1, nlab):
         if st[i, cv2.CC_STAT_AREA] >= 12:            # thin cursor / laser traces left out
+            if border_only and not _touches_border(st[i], a.bw, a.bh, 1):
+                continue
             out[lab == i] = 1
     if not out.any() or out.mean() > 0.4:
         return None
@@ -1427,7 +1442,12 @@ def _moving_between(a: "_Analyzer", t0: float, t1: float) -> Optional[np.ndarray
     return cv2.dilate(full, a.kernel, iterations=2)
 
 
-def _audience_zone(freq: np.ndarray, a: "_Analyzer") -> Optional[np.ndarray]:
+def _touches_border(st_row, W, H, m=2) -> bool:
+    x, y, w, h = st_row[:4]
+    return x <= m or y <= m or x + w >= W - m or y + h >= H - m
+
+
+def _audience_zone(freq: np.ndarray, a: "_Analyzer", border_only: bool = False) -> Optional[np.ndarray]:
     """Areas that keep changing while the slide itself stays the same:
     heads and hands of the audience, a lecturer walking in front.  Thin
     traces (cursor, laser dot) are left out: only sizable areas count."""
@@ -1441,15 +1461,105 @@ def _audience_zone(freq: np.ndarray, a: "_Analyzer") -> Optional[np.ndarray]:
     out = np.zeros_like(zone)
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] >= 0.004 * a.total:
+            if border_only and not _touches_border(st[i], a.ww, a.wh, max(2, a.ww // 60)):
+                continue
             out[lab == i] = 1
     if not out.any() or out.mean() > 0.35:
         return None              # nothing, or too much to be people
     return cv2.dilate(out, a.kernel, iterations=2)
 
 
+def _find_overlay(caps: List[Capture], a: _Analyzer, debug=None) -> Optional[np.ndarray]:
+    """Screen recording: a meeting app's video panel (Zoom participants)
+    lying over the slide.  Found on 8x8 blocks of the captures:
+      * at slide flips it stays as it is (only the slide changes),
+      * between flips it changes now and then (faces, speaker),
+      * it is a rectangle at the region's edge.
+    Returns a pixel mask of the panel rectangle, or None."""
+    if len(caps) < 6:
+        return None
+    B = a.BLOCK
+    flip_same = np.zeros((a.bh, a.bw), np.float32)
+    nflip = 0
+    other = np.zeros((a.bh, a.bw), np.float32)
+    for p, c in zip(caps, caps[1:]):
+        m = a.diff(p.small, c.small)
+        blk = cv2.resize(m.astype(np.float32), (a.bw, a.bh), interpolation=cv2.INTER_AREA) > 0.02
+        if m.mean() > 0.1:
+            flip_same += ~blk
+            nflip += 1
+        else:
+            other += blk
+    if nflip < 2:
+        return None
+    cand = ((flip_same / nflip >= 0.7) & (other >= 2)).astype(np.uint8)
+    if not cand.any():
+        return None
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    out = np.zeros((a.bh, a.bw), np.uint8)
+    for i in range(1, n):
+        x, y, w, h, area = st[i]
+        if not _touches_border(st[i], a.bw, a.bh, 1):
+            continue
+        frac = (w * h) / float(a.bw * a.bh)
+        fill = area / float(w * h)
+        if debug:
+            debug("panel candidate x%d y%d w%d h%d fill %.2f frac %.3f" % (x, y, w, h, fill, frac))
+        if 0.01 <= frac <= 0.25 and fill >= 0.5 and min(w, h) >= 3:
+            out[y:y + h, x:x + w] = 1      # panels are rectangles
+    if not out.any():
+        return None
+    if debug:
+        ys, xs = np.nonzero(out)
+        debug("video panel at blocks x %d-%d, y %d-%d (%.1f%% of the region)" % (
+            xs.min(), xs.max(), ys.min(), ys.max(), out.mean() * 100))
+    full = cv2.resize(out, (a.ww, a.wh), interpolation=cv2.INTER_NEAREST)
+    return cv2.dilate(full, a.kernel)
+
+
+def _screen_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> bool:
+    """Screen recording: do ``p`` and ``c`` differ only where a meeting
+    app's video panel changes (learnt: it keeps changing while slides stay)
+    and by one to three pointer spots?  Everything else is compared as
+    strictly as ever: one changed letter still makes a new slide."""
+    # only the panel found as a rectangle, and areas at the edge that kept
+    # changing over the whole video.  (Motion between the two captures is
+    # not used here: a slow fade between slides would look like it.)
+    zone = getattr(a, "audience", None)
+    panel = getattr(a, "overlay", None)
+    if zone is None and panel is None:
+        return False
+    m = a.diff(p.small, c.small)
+    if zone is not None:
+        m &= (1 - zone)
+    if panel is not None:
+        m &= (1 - panel)
+    if p.dyn is not None and c.dyn is not None:
+        m &= (1 - (p.dyn & c.dyn))
+    if not m.any():
+        return True
+    md = cv2.dilate(m, a.kernel)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
+    ptr_area = (a.ww * 0.035) * (a.ww * 0.045)
+    spots = 0
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area < a.tiny_blob:
+            continue
+        compact = max(w, h) <= 2.0 * min(w, h)
+        if area <= ptr_area * 1.2 and compact:
+            spots += 1
+            continue
+        return False                     # real content changed
+    return spots <= 3
+
+
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,
                    debug=None) -> List[Capture]:
     _learn_pointer_from_captures(caps, a, sig, debug)
+    if not s.stabilize:
+        a.overlay = _find_overlay(caps, a, debug)
     out: List[Capture] = []
     for c in caps:
         if out and s.stabilize:
@@ -1469,6 +1579,18 @@ def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,
                 if keep_c:
                     c.time, c.merged = out[k].time, out[k].merged
                     out[k] = c
+                continue
+        if out and not s.stabilize:
+            # screen recording with a video panel (Zoom etc.): the same slide
+            # as an earlier capture apart from the panel / pointer?
+            k = next((k for k in range(len(out) - 1, (-1 if s.dedupe else len(out) - 2), -1)
+                      if _screen_same(out[k], c, a, s)), None)
+            if k is not None:
+                if debug:
+                    debug("t=%.2f same slide as %.2f (panel)" % (c.time, out[k].time))
+                if k == len(out) - 1:
+                    c.time, c.merged = out[k].time, out[k].merged
+                    out[k] = c           # the later picture (cursor may have moved off)
                 continue
         if out:
             p = out[-1]

@@ -110,7 +110,8 @@ def run(name, workdir):
             m = base_mask.copy()
             if u["dynamic"]:
                 x, y, w, h = u["dynamic"]
-                m[y - 4:y + h + 4, x - 4:x + w + 4] = False
+                k = 4 if not cfg.get("shake") else 4 + int(2 * cfg["shake"])  # box edge moves with the camera
+                m[max(0, y - k):y + h + k, max(0, x - k):x + w + k] = False
             d = cv2.absdiff(g, u["g"])[m]
             if cfg.get("shake"):
                 # undo shift / exposure; keep whichever comparison is better

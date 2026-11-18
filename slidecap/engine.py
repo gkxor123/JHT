@@ -886,9 +886,16 @@ def detect_slides(
             if s.stabilize and len(raws) >= 2:
                 rm = a.diff(raw, raws[-2])
                 if rm.mean() < 0.03:            # no slide flip in this step
-                    still_motion += rm
+                    # only big moving things (people); a cursor or laser
+                    # dot is small and must not teach "audience" areas
+                    big = np.zeros_like(rm)
+                    ptr_big = 3.0 * (a.ww * 0.035) * (a.ww * 0.045)
+                    for x_, y_, w_, h_, ar_ in a.blobs(rm):
+                        if ar_ >= ptr_big:
+                            big[y_:y_ + h_, x_:x_ + w_] |= rm[y_:y_ + h_, x_:x_ + w_]
+                    still_motion += big
                     still_n += 1
-                    blk = cv2.resize(rm.astype(np.float32), (a.bw, a.bh), interpolation=cv2.INTER_AREA) > 0.02
+                    blk = cv2.resize(big.astype(np.float32), (a.bw, a.bh), interpolation=cv2.INTER_AREA) > 0.02
                     a.motion_log.append((t, np.packbits(blk)))
             T = a.diff(raw, clean)
             # a change covering much of the slide is a flip, not animation

@@ -1248,52 +1248,41 @@ def _learn_pointer_from_captures(caps: List[Capture], a: _Analyzer, sig, debug=N
 def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[bool, bool]:
     """Camera video: do captures ``p`` and ``c`` show the same slide?
 
-    Left out of the comparison: moving content (GIF, video), cursor-sized
-    spots and *occluders* - things that enter the region from its edge and
-    hide part of the screen (heads of the audience, the lecturer walking
-    by).  An occluder is a changed area touching the region's border that
-    is clearly darker (or brighter) in one capture than in the other.
+    Left out of the comparison: moving content seen in both (the same GIF
+    or video), the audience in front of the screen (``occluders``, already
+    left out by ``diff``) and one or two cursor / laser spots.  Text is
+    never taken for a cursor: a changed line of text is wide and flat, a
+    cursor or laser dot is compact.
     Returns (same, keep_c): keep_c tells whether ``c`` is the cleaner
-    picture (less hidden)."""
+    picture (less hidden by the audience)."""
+    oc_p, oc_c = a.occluders(p.small), a.occluders(c.small)
+    hid_p = 0.0 if oc_p is None else float(oc_p.mean())
+    hid_c = 0.0 if oc_c is None else float(oc_c.mean())
+    keep_c = hid_c <= hid_p              # a tie: the later one (last build step)
     m = a.diff_aligned(p.small, c.small)
     if p.dyn is not None and c.dyn is not None:
         m &= (1 - (p.dyn & c.dyn))      # only what moves in both (same GIF)
     if not m.any():
-        return True, False
+        return True, keep_c
     md = cv2.dilate(m, a.kernel)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
-    W, H = a.ww, a.wh
-    bx, by = max(3, int(W * 0.03)), max(3, int(H * 0.03))
     ptr_area = (a.ww * 0.035) * (a.ww * 0.045)
-    cb = a.align_fine(c.small, p.small).astype(np.int16)
-    pa = p.small.astype(np.int16)
     content = 0.0
-    small_blobs = []
-    hid_p = hid_c = 0.0
+    spots = []
     for i in range(1, n):
         x, y, w, h, area = stats[i]
-        reg = (labels[y:y + h, x:x + w] == i) & (m[y:y + h, x:x + w] > 0)
-        cnt = float(reg.sum())
+        cnt = float(((labels[y:y + h, x:x + w] == i) & (m[y:y + h, x:x + w] > 0)).sum())
         if cnt == 0:
             continue
-        at_edge = x <= bx or y <= by or x + w >= W - bx or y + h >= H - by
-        d = float((cb[y:y + h, x:x + w][reg] - pa[y:y + h, x:x + w][reg]).mean())
-        if at_edge and abs(d) > 25:
-            # dark thing in front of the screen in one of the two pictures
-            if d < 0:
-                hid_c += cnt
-            else:
-                hid_p += cnt
-            continue
-        if area <= ptr_area * 2:
-            small_blobs.append(cnt)
+        compact = max(w, h) <= 2.0 * min(w, h)
+        if area <= ptr_area * 2 and compact:
+            spots.append(cnt)
             continue
         content += cnt
-    # one or two cursor-sized spots: the pointer.  More small spots: text.
-    if len(small_blobs) > 2:
-        content += sum(small_blobs)
-    same = content / a.total < s.cam_same_frac
-    return same, hid_c <= hid_p          # a tie: the later one (last build step)
+    # one or two compact spots: the pointer.  More: small content (marks).
+    if len(spots) > 2:
+        content += sum(spots)
+    return content / a.total < s.cam_same_frac, keep_c
 
 
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,

@@ -1,0 +1,60 @@
+name: Build VSplit exe
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["vsplit/**", "vsplit_main.py", "VSplit.spec", "tests/test_vsplit.py", ".github/workflows/build-vsplit.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r vsplit/requirements.txt pyinstaller==6.22.3
+
+      - name: Test (Korean folder name)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "영상 자르기 테스트"
+          $out = & python tests/test_vsplit.py $dir 2>&1 | ForEach-Object { "$_" }
+          $out
+          $msg = (($out | Select-Object -Last 30) -join "%0A") -replace "::", ": :"
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=test_vsplit::$msg"; exit 1 }
+
+      - name: Build exe
+        run: pyinstaller --noconfirm VSplit.spec
+
+      - name: Test the packaged exe
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "영상 자르기 테스트"
+          $src = Join-Path $dir "강의 영상.mp4"
+          $out = Join-Path $dir "exe 결과"
+          $p = Start-Process -FilePath "dist\VSplit.exe" -Wait -PassThru `
+               -ArgumentList @("--cli", "`"$src`"", "--minutes", "0.5", "--max-mb", "1", "--out", "`"$out`"")
+          Get-Content (Join-Path $env:USERPROFILE "vsplit_cli.log") -ErrorAction SilentlyContinue | Select-Object -Last 5
+          if ($p.ExitCode -ne 0) { throw "exe failed with exit code $($p.ExitCode)" }
+          $n = (Get-ChildItem $out -Filter *.mp4).Count
+          "pieces: $n"
+          if ($n -ne 3) { throw "expected 3 pieces, got $n" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VSplit-windows
+          path: dist/VSplit.exe
+          if-no-files-found: error

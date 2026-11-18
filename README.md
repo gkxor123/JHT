@@ -98,3 +98,13 @@ pyinstaller SlideCap.spec        # exe 빌드 (dist/SlideCap.exe)
 
 GitHub에 push하면 Actions(`Build Windows exe`)가 Windows에서 테스트한 뒤 exe를 빌드합니다.
 빌드된 exe는 해당 실행 결과 페이지의 Artifacts에서 받을 수 있습니다.
+
+## VSplit — 영상 자르기
+
+긴 강의 영상을 몇 분짜리 조각으로 자릅니다 (`VSplit.exe`, GitHub Actions의 `VSplit-windows`).
+
+- 영상 파일이나 폴더를 창이나 exe 아이콘에 끌어다 놓고 **▶ 자르기 시작**.
+- **공유용**(기본): 조각마다 24MB 이하(GitHub 웹 업로드 한도 25MB), 가로 1280, 소리 없음, 초당 15장.
+- **원본 그대로**: 다시 인코딩하지 않아 빠르고 화질·소리가 그대로지만 파일이 큽니다. 조각은 키프레임에서 시작해 몇 초 길거나 짧을 수 있습니다.
+- 결과는 영상 옆 `영상이름_조각` 폴더에 `영상이름_01 (00-00-00).mp4`처럼 저장됩니다.
+- 명령줄: `VSplit.exe --cli "영상.mp4" --minutes 5 [--copy] [--max-mb 24] [--out 폴더]`

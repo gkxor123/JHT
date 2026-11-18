@@ -106,6 +106,7 @@ def run(name, workdir):
     for c in caps:
         g = gray_small(c.image)
         best, best_err, best_bad = None, 1e9, 1.0
+        errs = {}
         for i, u in enumerate(uniq):
             m = base_mask.copy()
             if u["dynamic"]:
@@ -120,11 +121,21 @@ def run(name, workdir):
                 if float(d2.mean()) < float(d.mean()):
                     d = d2
             err = float(d.mean())
+            errs[i] = (err, float((d > 60).mean()))
             if err < best_err:
                 best, best_err, best_bad = i, err, float((d > 60).mean())
+        lim_err, lim_bad = (4.0, 0.0006) if not cfg.get("shake") else (6.0, 0.01)
+        if cfg.get("shake"):
+            # slides that differ by a small arrow look alike through a
+            # camera: prefer the slide shown at the capture time when the
+            # picture fits it (a collapsed build-up keeps its first step's
+            # time, so it falls back to the best-looking slide)
+            tt = c.time + 0.75
+            j = next((seg_uid[k] for k, sg in enumerate(segs) if sg["start"] <= tt < sg["end"]), None)
+            if j is not None and errs[j][0] <= lim_err and errs[j][1] <= lim_bad:
+                best, best_err, best_bad = j, errs[j][0], errs[j][1]
         hits[best] += 1
         rows.append((c.time, best, best_err, best_bad))
-        lim_err, lim_bad = (4.0, 0.0006) if not cfg.get("shake") else (6.0, 0.01)
         if best_err > lim_err or best_bad > lim_bad:
             problems.append("capture at %.1fs looks wrong (slide %d, mean err %.2f, bad px %.3f%%)"
                             % (c.time, best, best_err, best_bad * 100))

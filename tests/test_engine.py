@@ -129,6 +129,8 @@ def run(name, workdir):
             if err < best_err:
                 best, best_err, best_bad = i, err, float((d > 60).mean())
         lim_err, lim_bad = (4.0, 0.0006) if not cfg.get("shake") else (6.0, 0.01)
+        if cfg.get("tilt"):
+            lim_bad = 0.02      # the room margin kept around the screen adds ~1%
         if cfg.get("shake"):
             # slides that differ by a small arrow look alike through a
             # camera: prefer the slide shown at the capture time when the

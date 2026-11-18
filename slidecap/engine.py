@@ -78,7 +78,7 @@ class Settings:
     stabilize: Optional[bool] = None  # camera shake handling; None = measure per video
     shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
     max_shift: float = 0.015        # largest shake followed, part of the width
-    cam_same_frac: float = 0.0015   # camera video: captures differing less are one slide
+    cam_same_frac: float = 0.003    # camera video: captures whose changed area (blobs) is smaller are one slide
 
     @classmethod
     def preset(cls, name: str) -> "Settings":
@@ -1275,12 +1275,15 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
         if cnt == 0:
             continue
         compact = max(w, h) <= 2.0 * min(w, h)
-        if area <= ptr_area * 2 and compact:
-            spots.append(cnt)
+        if area <= ptr_area * 1.2 and compact:
+            spots.append(float(area))
             continue
-        content += cnt
-    # one or two compact spots: the pointer.  More: small content (marks).
-    if len(spots) > 2:
+        # measured by the blob's area: a thin arrow or a line of text counts
+        # by the place it takes, not by its few changed pixels
+        content += float(area)
+    # up to three cursor-sized compact spots: the pointer where it was, where
+    # it is now, a laser dot.  More: small marks drawn on the slide.
+    if len(spots) > 3:
         content += sum(spots)
     return content / a.total < s.cam_same_frac, keep_c
 

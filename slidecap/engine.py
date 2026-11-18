@@ -1274,6 +1274,8 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
         cnt = float(((labels[y:y + h, x:x + w] == i) & (m[y:y + h, x:x + w] > 0)).sum())
         if cnt == 0:
             continue
+        if _edge_strip(a, x, y, w, h):
+            continue                     # the screen's border moving with the camera
         compact = max(w, h) <= 2.0 * min(w, h)
         if area <= ptr_area * 1.2 and compact:
             spots.append(float(area))

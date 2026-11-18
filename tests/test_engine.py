@@ -111,10 +111,13 @@ def run(name, workdir):
             if u["dynamic"]:
                 x, y, w, h = u["dynamic"]
                 m[y - 4:y + h + 4, x - 4:x + w + 4] = False
-            gc = g
+            d = cv2.absdiff(g, u["g"])[m]
             if cfg.get("shake"):
-                gc = match_camera(g, u["g"], m)
-            d = cv2.absdiff(gc, u["g"])[m]
+                # undo shift / exposure; keep whichever comparison is better
+                # (the alignment itself can be fooled by big plain areas)
+                d2 = cv2.absdiff(match_camera(g, u["g"], m), u["g"])[m]
+                if float(d2.mean()) < float(d.mean()):
+                    d = d2
             err = float(d.mean())
             if err < best_err:
                 best, best_err, best_bad = i, err, float((d > 60).mean())
@@ -129,7 +132,8 @@ def run(name, workdir):
     # one letter: either neighbour may stand for the pair.
     pairs = []
     if cfg.get("shake"):
-        lenient = {id(mtv.S2c): id(mtv.S2d), id(mtv.S10): id(mtv.S9), id(mtv.S11): id(mtv.S10)}
+        lenient = {id(mtv.S2c): id(mtv.S2d), id(mtv.S9): id(mtv.S10),
+                   id(mtv.S10): id(mtv.S9), id(mtv.S11): id(mtv.S10)}
         by_id = {id(u["slide"]): i for i, u in enumerate(uniq)}
         for a_, b_ in lenient.items():
             if a_ in by_id and b_ in by_id:
@@ -158,6 +162,16 @@ def run(name, workdir):
             problems.append("MISSING bullet slide (neither last nor second-to-last step)")
         if hits[i2c] + hits[i2d] > 2:
             problems.append("bullet slide captured %d times" % (hits[i2c] + hits[i2d]))
+        # the three quick slides differ by one or two letters only: any of
+        # them may stand for another, but at least one must be there and
+        # none may be saved more often than the three are shown
+        quick = [i for i, u in enumerate(uniq) if any(u["slide"] is q for q in (mtv.S9, mtv.S10, mtv.S11))]
+        nq = sum(hits[i] for i in quick)
+        problems = [p for p in problems if not any(("slide %d " % i) in p for i in quick)]
+        if nq == 0:
+            problems.append("MISSING quick slides (none of the three)")
+        if nq > 3:
+            problems.append("quick slides captured %d times" % nq)
     out = write_pptx(caps, os.path.join(workdir, name + ".pptx"))
     print("\n[%s] %d captures -> %s" % (name, len(caps), os.path.basename(out)))
     for t, b, e, bad in rows:

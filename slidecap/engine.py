@@ -78,6 +78,7 @@ class Settings:
     stabilize: Optional[bool] = None  # camera shake handling; None = measure per video
     shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
     max_shift: float = 0.015        # largest shake followed, part of the width
+    cam_same_frac: float = 0.0015   # camera video: captures differing less are one slide
 
     @classmethod
     def preset(cls, name: str) -> "Settings":
@@ -364,9 +365,15 @@ class _Analyzer:
             r_ = cv2.resize(ref, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
             i_ = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
             w_ = warp.copy(); w_[:, 2] *= f
+            # align on the screen only: not on the audience moving in front
+            msk = self.valid.copy()
+            for o in (self.occluders(ref), self.occluders(img)):
+                if o is not None:
+                    msk[o > 0] = 0
+            msk = cv2.resize(msk, (r_.shape[1], r_.shape[0]), interpolation=cv2.INTER_NEAREST)
             _, w_ = cv2.findTransformECC(r_, i_, w_, cv2.MOTION_AFFINE,
                                          (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 40, 1e-4),
-                                         None, 3)
+                                         msk, 3)
             w_[:, 2] /= f
             lin = w_[:, :2]
             if (np.abs(lin - np.eye(2)).max() < 0.02 and abs(w_[0, 2]) <= lim and abs(w_[1, 2]) <= lim):
@@ -463,11 +470,44 @@ class _Analyzer:
         g = cv2.resize(g, (self.ww, self.wh), interpolation=cv2.INTER_AREA)
         return cv2.GaussianBlur(g, (3, 3), 0)
 
+    def occluders(self, img: np.ndarray) -> Optional[np.ndarray]:
+        """Camera video: the audience in front of the screen - dark shapes
+        (heads, shoulders) rising from the region's lower edge.  Dark pixels
+        connected to the bottom edge through dark pixels.  None when there
+        is nothing, or when it is too big to be people (a dark slide)."""
+        lvl = float(np.median(img[::4, ::4]))
+        thr = min(50.0, 0.3 * lvl)
+        if thr < 15:
+            return None                  # dark slide: cannot tell people apart
+        dark = (img < thr).astype(np.uint8)
+        if not dark[-2:].any():
+            return None
+        # people are solid dark shapes; thin dark lines (edges inside a CT
+        # image, text) must not link a dark picture to them
+        r = max(2, int(round(self.ww / 160.0)))
+        dark = cv2.erode(dark, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+        if not dark[-2:].any():
+            return None
+        n, lab = cv2.connectedComponents(dark, connectivity=8)
+        ids = np.unique(lab[-2:][dark[-2:] > 0])
+        occ = np.isin(lab, ids[ids > 0])
+        if occ.mean() > 0.4 or occ.mean() < 0.002:
+            return None
+        return cv2.dilate(occ.astype(np.uint8), self.kernel, iterations=2)
+
     def diff(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         t = self.s.pixel_thresh
         if not self.s.stabilize:
             d = cv2.absdiff(a, b)
             return ((d > t) & (self.valid > 0)).astype(np.uint8)
+        valid = self.valid
+        oa, ob = self.occluders(a), self.occluders(b)
+        if oa is not None or ob is not None:
+            valid = valid.copy()
+            if oa is not None:
+                valid[oa > 0] = 0
+            if ob is not None:
+                valid[ob > 0] = 0
         b = self._match_exposure(a, b)
         d = cv2.absdiff(a, b) > t
         if d.any() and self.tol_kernel is not None:
@@ -478,7 +518,7 @@ class _Analyzer:
             bmax, bmin = cv2.dilate(b, k).astype(np.int16), cv2.erode(b, k).astype(np.int16)
             amax, amin = cv2.dilate(a, k).astype(np.int16), cv2.erode(a, k).astype(np.int16)
             d &= ((ai > bmax + t) | (ai < bmin - t) | (bi > amax + t) | (bi < amin - t))
-        return (d & (self.valid > 0)).astype(np.uint8)
+        return (d & (valid > 0)).astype(np.uint8)
 
     def blobs(self, mask: np.ndarray) -> np.ndarray:
         """Connected components (after dilation) as rows of x, y, w, h, area."""
@@ -1205,11 +1245,80 @@ def _learn_pointer_from_captures(caps: List[Capture], a: _Analyzer, sig, debug=N
     return learned
 
 
+def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[bool, bool]:
+    """Camera video: do captures ``p`` and ``c`` show the same slide?
+
+    Left out of the comparison: moving content (GIF, video), cursor-sized
+    spots and *occluders* - things that enter the region from its edge and
+    hide part of the screen (heads of the audience, the lecturer walking
+    by).  An occluder is a changed area touching the region's border that
+    is clearly darker (or brighter) in one capture than in the other.
+    Returns (same, keep_c): keep_c tells whether ``c`` is the cleaner
+    picture (less hidden)."""
+    m = a.diff_aligned(p.small, c.small)
+    if p.dyn is not None and c.dyn is not None:
+        m &= (1 - (p.dyn & c.dyn))      # only what moves in both (same GIF)
+    if not m.any():
+        return True, False
+    md = cv2.dilate(m, a.kernel)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(md, connectivity=8)
+    W, H = a.ww, a.wh
+    bx, by = max(3, int(W * 0.03)), max(3, int(H * 0.03))
+    ptr_area = (a.ww * 0.035) * (a.ww * 0.045)
+    cb = a.align_fine(c.small, p.small).astype(np.int16)
+    pa = p.small.astype(np.int16)
+    content = 0.0
+    small_blobs = []
+    hid_p = hid_c = 0.0
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        reg = (labels[y:y + h, x:x + w] == i) & (m[y:y + h, x:x + w] > 0)
+        cnt = float(reg.sum())
+        if cnt == 0:
+            continue
+        at_edge = x <= bx or y <= by or x + w >= W - bx or y + h >= H - by
+        d = float((cb[y:y + h, x:x + w][reg] - pa[y:y + h, x:x + w][reg]).mean())
+        if at_edge and abs(d) > 25:
+            # dark thing in front of the screen in one of the two pictures
+            if d < 0:
+                hid_c += cnt
+            else:
+                hid_p += cnt
+            continue
+        if area <= ptr_area * 2:
+            small_blobs.append(cnt)
+            continue
+        content += cnt
+    # one or two cursor-sized spots: the pointer.  More small spots: text.
+    if len(small_blobs) > 2:
+        content += sum(small_blobs)
+    same = content / a.total < s.cam_same_frac
+    return same, hid_c <= hid_p          # a tie: the later one (last build step)
+
+
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,
                    debug=None) -> List[Capture]:
     _learn_pointer_from_captures(caps, a, sig, debug)
     out: List[Capture] = []
     for c in caps:
+        if out and s.stabilize:
+            # camera video: same slide as one already saved, apart from
+            # heads / cursor / shake?  Then keep only the cleaner picture.
+            dup = None
+            first = 0 if s.dedupe else len(out) - 1
+            for k in range(len(out) - 1, first - 1, -1):
+                same, keep_c = _camera_same(out[k], c, a, s)
+                if same:
+                    dup = (k, keep_c)
+                    break
+            if dup is not None:
+                k, keep_c = dup
+                if debug:
+                    debug("t=%.2f same slide as %.2f (camera)" % (c.time, out[k].time))
+                if keep_c:
+                    c.time, c.merged = out[k].time, out[k].merged
+                    out[k] = c
+                continue
         if out:
             p = out[-1]
             kind, keep_c = _relation(p, c, a, sig)

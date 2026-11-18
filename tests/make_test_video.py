@@ -153,7 +153,22 @@ def cursor_pos(t):
 TILT_QUAD = [(120, 95), (930, 60), (985, 625), (70, 590)]
 
 
-def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0, tilt=False):
+def draw_heads(frame, t, sc):
+    """Audience in front of the screen: dark heads over the slide's lower
+    edge, swaying, now and then one leans or moves to another place."""
+    rng = np.random.default_rng(int(t / 6.0) + 100)      # a new pose every 6 s
+    base = [(RX + 180, 0), (RX + 520, 1), (RX + 800, 2)]
+    for bx, k in base:
+        jump = int(rng.integers(-60, 61))
+        x = bx + jump + 6 * np.sin(t * 1.3 + k)
+        y = RY + RH - 25 + 5 * np.sin(t * 0.9 + 2 * k) + int(rng.integers(-15, 16))
+        cv2.ellipse(frame, (int(x * sc), int(y * sc)), (int(55 * sc), int(70 * sc)), 0, 0, 360,
+                    (28, 26, 24), -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (int((x - 90) * sc), int((y + 45) * sc)), (int((x + 90) * sc), int((RY + RH + 80) * sc)),
+                      (32, 30, 28), -1)
+
+
+def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0, tilt=False, heads=False):
     """``shake`` > 0 simulates a hand-held / tripod camera filming the
     screen: the whole picture jitters by up to ``shake`` pixels (with an
     occasional bump twice as large), slight zoom/rotation wobble, the
@@ -219,6 +234,8 @@ def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0, tilt=False):
             if int(t) % 7 < 3 and t < 81:   # laser pointer
                 lx = RX + 300 + 200 * np.cos(t * 1.7); ly = RY + 300 + 120 * np.sin(t * 2.1)
                 cv2.circle(frame, (int(lx * sc), int(ly * sc)), int(7 * sc), (0, 0, 255), -1)
+            if heads:
+                draw_heads(frame, t, sc)
             if tilt:
                 frame = cv2.warpPerspective(frame, tilt_h, (W, H), borderValue=(20, 20, 20))
                 frame[tilt_dark] = (frame[tilt_dark] * 0.45).astype(np.uint8)

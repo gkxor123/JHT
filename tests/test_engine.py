@@ -35,6 +35,8 @@ SCENARIOS = {
     "camera_shake": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, shake=3.0),
     "camera_shake_strong": dict(scale=1.5, crf=34, cam_inside=False, exclude_cam=False, shake=6.0),
     # projector screen filmed from the side: trapezoid, straightened by the engine
+    # audience heads move in front of the screen's lower edge
+    "camera_audience": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, shake=3.0, heads=True),
     "camera_tilted": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, shake=2.0, tilt=True),
 }
 
@@ -67,7 +69,7 @@ def run(name, workdir):
     cfg = SCENARIOS[name]
     path = os.path.join(workdir, name + ".mp4")
     roi, cam, segs = mtv.make(path, cfg["scale"], cfg["crf"], cfg["cam_inside"], cfg.get("shake", 0.0),
-                              cfg.get("tilt", False))
+                              cfg.get("tilt", False), cfg.get("heads", False))
     excludes = [cam] if cfg["exclude_cam"] else []
     st = Settings()
     st.collapse_builds = cfg.get("collapse", True)
@@ -81,6 +83,8 @@ def run(name, workdir):
         x0, y0 = int(cx / sc) - mtv.RX - 4, int(cy / sc) - mtv.RY - 4
         base_mask[max(0, y0):y0 + int(ch / sc) + 8, max(0, x0):x0 + int(cw / sc) + 8] = False
 
+    if cfg.get("heads"):
+        base_mask[int(mtv.RH * 0.72):] = False      # hidden by the audience
     if cfg.get("tilt"):
         # the straightened screen keeps a small margin of the room around it
         # (so the slide is never cut): leave that border out of the scoring

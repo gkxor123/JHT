@@ -384,6 +384,43 @@ class _Analyzer:
                               flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                               borderMode=cv2.BORDER_REPLICATE)
 
+    def align_features(self, img: np.ndarray, ref: np.ndarray):
+        """Move ``img`` onto ``ref`` by matching feature points (ORB +
+        homography).  Follows what small-step alignment cannot: the camera
+        panned, zoomed or turned a lot between two captures.  Returns
+        (warped, covered-mask) or None when the pictures do not match well
+        (different slides, or too little detail)."""
+        try:
+            orb = getattr(self, "_orb", None)
+            if orb is None:
+                orb = self._orb = cv2.ORB_create(1500)
+            k1, d1 = orb.detectAndCompute(img, None)
+            k2, d2 = orb.detectAndCompute(ref, None)
+            if d1 is None or d2 is None or len(k1) < 40 or len(k2) < 40:
+                return None
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+            pairs = bf.knnMatch(d1, d2, k=2)
+            good = [m for m, *rest in pairs if rest and m.distance < 0.75 * rest[0].distance]
+            if len(good) < 30:
+                return None
+            src = np.float32([k1[m.queryIdx].pt for m in good])
+            dst = np.float32([k2[m.trainIdx].pt for m in good])
+            H, inl = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+            if H is None or inl is None or int(inl.sum()) < max(25, 0.3 * len(good)):
+                return None
+            # a camera move: moderate zoom / tilt, no folding
+            sx = math.hypot(H[0, 0], H[1, 0]); sy = math.hypot(H[0, 1], H[1, 1])
+            if not (0.75 < sx < 1.35 and 0.75 < sy < 1.35) or abs(H[2, 0]) > 1e-3 or abs(H[2, 1]) > 1e-3:
+                return None
+            hh, ww = ref.shape
+            warped = cv2.warpPerspective(img, H, (ww, hh), flags=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_REPLICATE)
+            cover = cv2.warpPerspective(np.ones_like(img), H, (ww, hh), flags=cv2.INTER_NEAREST)
+            cover = cv2.erode(cover, np.ones((5, 5), np.uint8))
+            return warped, cover
+        except cv2.error:
+            return None
+
     def diff_aligned(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """``diff`` after moving ``b`` onto ``a`` (pictures taken far apart in
         time, when the camera may have drifted, turned or zoomed a little)."""
@@ -578,9 +615,11 @@ def is_camera_video(path: str, roi: Rect, s: Optional[Settings] = None,
     """Was the video filmed with a camera (shake, exposure, sensor noise)
     rather than recorded from the computer screen?
 
-    Looks at ``n`` pairs of frames a quarter second apart.  A screen
+    Looks at ``n`` places, each with frames 0.25 s and 2 s later.  A screen
     recording repeats the unchanged slide exactly (apart from a little
-    compression noise); a camera picture moves and flickers all the time."""
+    compression noise); a camera picture moves, drifts and flickers.  A
+    steady camera on a dark, clean picture shows little in a quarter
+    second, so the drift over two seconds is checked too."""
     import copy
     s = copy.copy(s or Settings())
     s.stabilize = False
@@ -590,28 +629,39 @@ def is_camera_video(path: str, roi: Rect, s: Optional[Settings] = None,
         dur = video_info(path)["duration"] or 0.0
     except Exception:
         return False
-    shifts, noises = [], []
+    res = {0.25: ([], []), 2.0: ([], [])}
     for i in range(n):
         t = dur * (0.05 + 0.9 * (i + 0.5) / n) if dur > 0 else 0.0
         try:
             f0 = frame_at(path, t)[y:y + h, x:x + w]
-            f1 = frame_at(path, t + 0.25)[y:y + h, x:x + w]
         except Exception:
             continue
-        if f0.size == 0 or f1.size == 0:
+        if f0.size == 0:
             continue
         if crops_out is not None:
             crops_out.append(f0)
-        g0, g1 = a.prep(f0), a.prep(f1)
-        d = cv2.absdiff(g0, g1)
-        if (d > s.pixel_thresh).mean() > 0.05:
-            continue                     # slide flip / video playing: no use
-        (dx, dy), _ = cv2.phaseCorrelate(g0.astype(np.float32), g1.astype(np.float32), a.hann)
-        shifts.append(math.hypot(dx, dy))
-        noises.append(float(d[d <= s.pixel_thresh].mean()))
-    if len(shifts) < 3:
-        return False
-    return float(np.median(shifts)) >= 0.25 or float(np.median(noises)) >= 1.5
+        g0 = a.prep(f0)
+        for gap, (shifts, noises) in res.items():
+            try:
+                f1 = frame_at(path, t + gap)[y:y + h, x:x + w]
+            except Exception:
+                continue
+            if f1.shape != f0.shape:
+                continue
+            g1 = a.prep(f1)
+            d = cv2.absdiff(g0, g1)
+            if (d > s.pixel_thresh).mean() > 0.05:
+                continue                 # slide flip / video playing: no use
+            (dx, dy), _ = cv2.phaseCorrelate(g0.astype(np.float32), g1.astype(np.float32), a.hann)
+            shifts.append(math.hypot(dx, dy))
+            noises.append(float(d[d <= s.pixel_thresh].mean()))
+
+    def med(v):
+        return float(np.median(v)) if len(v) >= 3 else 0.0
+    s1, n1 = res[0.25]
+    s2, n2 = res[2.0]
+    return (med(s1) >= 0.25 or med(n1) >= 1.5 or
+            med(s2) >= 0.3 or med(n2) >= 1.2)
 
 
 def find_screen_quad(crops: Sequence[np.ndarray]) -> Optional[np.ndarray]:
@@ -1260,6 +1310,15 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
     hid_c = 0.0 if oc_c is None else float(oc_c.mean())
     keep_c = hid_c <= hid_p              # a tie: the later one (last build step)
     m = a.diff_aligned(p.small, c.small)
+    if m.mean() > s.cam_same_frac:
+        # the camera may have panned / zoomed a lot between the two: try
+        # feature-point alignment and keep whichever explains more
+        fa = a.align_features(c.small, p.small)
+        if fa is not None:
+            warped, cover = fa
+            m2 = a.diff(p.small, warped) & cover
+            if m2.sum() < m.sum():
+                m = m2
     if p.dyn is not None and c.dyn is not None:
         m &= (1 - (p.dyn & c.dyn))      # only what moves in both (same GIF)
     if not m.any():

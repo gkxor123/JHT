@@ -138,7 +138,8 @@ def run(name, workdir):
             # time, so it falls back to the best-looking slide)
             tt = c.time + 0.75
             j = next((seg_uid[k] for k, sg in enumerate(segs) if sg["start"] <= tt < sg["end"]), None)
-            if j is not None and errs[j][0] <= lim_err and errs[j][1] <= lim_bad:
+            if (j is not None and errs[j][0] <= lim_err and errs[j][1] <= lim_bad
+                    and errs[j][0] <= best_err * 1.15 + 0.15):
                 best, best_err, best_bad = j, errs[j][0], errs[j][1]
         hits[best] += 1
         rows.append((c.time, best, best_err, best_bad))

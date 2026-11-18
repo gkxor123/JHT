@@ -1383,7 +1383,13 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
     # could not fully undo, an added arrow): the same slide.  A new slide or
     # a replaced picture changes far more (10-50 %).  The later picture is
     # kept, so an added mark is not lost.
-    return float(m.sum()) / a.total < s.cam_same_pixels, keep_c
+    if float(m.sum()) / a.total >= s.cam_same_pixels:
+        return False, keep_c
+    # ... but only when the title stays: a new slide nearly always has a
+    # new title, while people and camera zoom leave it alone
+    band = max(4, int(a.wh * 0.2))
+    title = float(m[:band].sum()) / float(band * a.ww)
+    return title < 0.004, keep_c
 
 
 def _moving_between(a: "_Analyzer", t0: float, t1: float) -> Optional[np.ndarray]:

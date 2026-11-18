@@ -149,11 +149,17 @@ def cursor_pos(t):
     return cx, cy
 
 
-def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0):
+# a projector screen filmed from the side: where the slide's corners end up
+TILT_QUAD = [(120, 95), (930, 60), (985, 625), (70, 590)]
+
+
+def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0, tilt=False):
     """``shake`` > 0 simulates a hand-held / tripod camera filming the
     screen: the whole picture jitters by up to ``shake`` pixels (with an
     occasional bump twice as large), slight zoom/rotation wobble, the
-    exposure drifts and flickers, and there is sensor noise."""
+    exposure drifts and flickers, and there is sensor noise.
+    ``tilt`` films the screen at an angle (a trapezoid in a dark room);
+    the returned roi is then the box around that trapezoid."""
     W, H = int(1280 * scale) // 2 * 2, int(720 * scale) // 2 * 2
     sc = scale
     roi = tuple(int(round(v * sc)) for v in (RX, RY, RW, RH))
@@ -168,6 +174,20 @@ def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0):
         st = container.add_stream("mpeg4", rate=FPS)
         st.options = {"qscale": str(max(2, min(31, crf // 4)))}
     st.width, st.height, st.pix_fmt = W, H, "yuv420p"
+    if tilt:
+        src = np.float32([[RX, RY], [RX + RW, RY], [RX + RW, RY + RH], [RX, RY + RH]]) * sc
+        dst = np.float32(TILT_QUAD) * sc
+        tilt_h = cv2.getPerspectiveTransform(src, dst)
+        m = np.zeros((H, W), np.uint8)
+        cv2.fillConvexPoly(m, dst.astype(np.int32), 1)
+        tilt_dark = m == 0            # the room around the screen is dark
+        xs, ys = dst[:, 0], dst[:, 1]
+        pad = int(15 * sc)
+        x0, y0 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+        x1, y1 = min(W, int(xs.max()) + pad), min(H, int(ys.max()) + pad)
+        out_roi = (x0, y0, x1 - x0, y1 - y0)
+    else:
+        out_roi = roi
     segments = []
     t0 = 0.0
     prev_slide = None
@@ -199,6 +219,9 @@ def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0):
             if int(t) % 7 < 3 and t < 81:   # laser pointer
                 lx = RX + 300 + 200 * np.cos(t * 1.7); ly = RY + 300 + 120 * np.sin(t * 2.1)
                 cv2.circle(frame, (int(lx * sc), int(ly * sc)), int(7 * sc), (0, 0, 255), -1)
+            if tilt:
+                frame = cv2.warpPerspective(frame, tilt_h, (W, H), borderValue=(20, 20, 20))
+                frame[tilt_dark] = (frame[tilt_dark] * 0.45).astype(np.uint8)
             if shake > 0:
                 # smooth random walk pulled back to the centre, plus bumps
                 jx = 0.85 * jx + srng.normal(0, shake * 0.35)
@@ -225,7 +248,7 @@ def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0):
     for p in st.encode():
         container.mux(p)
     container.close()
-    return roi, cam, segments
+    return out_roi, cam, segments
 
 
 if __name__ == "__main__":

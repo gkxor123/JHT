@@ -75,7 +75,7 @@ class Settings:
     dedupe: bool = True             # skip slides identical to an earlier one
     collapse_builds: bool = True    # text/figure build-up: keep only final step
     image_format: str = "jpg"       # jpg (smaller) or png (lossless)
-    stabilize: bool = True          # compensate camera shake / exposure drift
+    stabilize: Optional[bool] = None  # camera shake handling; None = measure per video
     shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
     max_shift: float = 0.015        # largest shake followed, part of the width
 
@@ -271,6 +271,12 @@ class _Analyzer:
             x1, y1 = min(self.ww, x1), min(self.wh, y1)
             if x1 > x0 and y1 > y0:
                 self.valid[y0:y1, x0:x1] = 0
+        if s.stabilize:
+            # a shaking camera moves the surroundings in and out along the
+            # region's edges: leave a thin band there out of every comparison
+            bw = max(2, int(math.ceil(s.max_shift * self.ww * 0.5)))
+            self.valid[:bw] = 0; self.valid[-bw:] = 0
+            self.valid[:, :bw] = 0; self.valid[:, -bw:] = 0
         self.total = float(self.ww * self.wh)
         self.tiny_blob = max(6, int(s.tiny_blob_frac * self.total))
         k = max(3, int(round(self.ww / 90.0)) | 1)
@@ -342,10 +348,41 @@ class _Analyzer:
             return b
         return cv2.convertScaleAbs(b, alpha=g, beta=o)
 
+    def align_fine(self, img: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        """Move ``img`` onto ``ref`` including the slight rotation / zoom of a
+        camera (ECC, affine).  Falls back to a plain shift when the pictures
+        are too different to be aligned (a different slide)."""
+        if not self.s.stabilize:
+            return img
+        (dx, dy), resp = cv2.phaseCorrelate(ref.astype(np.float32), img.astype(np.float32), self.hann)
+        lim = self.s.max_shift * self.ww
+        if resp < 0.1 or abs(dx) > lim or abs(dy) > lim:
+            return self.align(img, ref)
+        warp = np.float32([[1, 0, dx], [0, 1, dy]])
+        try:
+            f = 0.5   # half resolution is plenty and 4x faster
+            r_ = cv2.resize(ref, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+            i_ = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+            w_ = warp.copy(); w_[:, 2] *= f
+            _, w_ = cv2.findTransformECC(r_, i_, w_, cv2.MOTION_AFFINE,
+                                         (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 40, 1e-4),
+                                         None, 3)
+            w_[:, 2] /= f
+            lin = w_[:, :2]
+            if (np.abs(lin - np.eye(2)).max() < 0.02 and abs(w_[0, 2]) <= lim and abs(w_[1, 2]) <= lim):
+                warp = w_
+        except cv2.error:
+            pass
+        return cv2.warpAffine(img, warp, (img.shape[1], img.shape[0]),
+                              flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REPLICATE)
+
     def diff_aligned(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """``diff`` after moving ``b`` onto ``a`` (pictures taken far apart in
-        time, when the camera may have drifted)."""
-        return self.diff(a, self.align(b, a))
+        time, when the camera may have drifted, turned or zoomed a little)."""
+        if not self.s.stabilize:
+            return self.diff(a, b)
+        return self.diff(a, self.align_fine(b, a))
 
     def add_pointer_template(self, patch: np.ndarray) -> None:
         """Remember what the pointer looks like, at full resolution.
@@ -460,11 +497,16 @@ class _Analyzer:
         """Dynamic blocks -> pixel mask; each moving area is filled to its
         bounding rectangle (GIFs and videos are rectangular)."""
         b = cv2.dilate(bmask.astype(np.uint8), self.block_kernel)
-        n, _, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
         out = np.zeros_like(b)
         for i in range(1, n):
-            bx, by, bw, bh = stats[i, :4]
-            out[by:by + bh, bx:bx + bw] = 1
+            bx, by, bw, bh, area = stats[i]
+            if area >= 0.35 * bw * bh:
+                out[by:by + bh, bx:bx + bw] = 1
+            else:
+                # thin / sparse (e.g. an L-shaped strip along the edges):
+                # not a rectangular video, keep only the blocks themselves
+                out[labels == i] = 1
         return cv2.resize(out, (self.ww, self.wh), interpolation=cv2.INTER_NEAREST)
 
     def is_change(self, mask: np.ndarray, ptr_sig=None) -> bool:
@@ -491,6 +533,130 @@ class _Analyzer:
         return True
 
 
+def is_camera_video(path: str, roi: Rect, s: Optional[Settings] = None,
+                    n: int = 12, crops_out: Optional[list] = None) -> bool:
+    """Was the video filmed with a camera (shake, exposure, sensor noise)
+    rather than recorded from the computer screen?
+
+    Looks at ``n`` pairs of frames a quarter second apart.  A screen
+    recording repeats the unchanged slide exactly (apart from a little
+    compression noise); a camera picture moves and flickers all the time."""
+    import copy
+    s = copy.copy(s or Settings())
+    s.stabilize = False
+    a = _Analyzer(roi, (), s)
+    x, y, w, h = roi
+    try:
+        dur = video_info(path)["duration"] or 0.0
+    except Exception:
+        return False
+    shifts, noises = [], []
+    for i in range(n):
+        t = dur * (0.05 + 0.9 * (i + 0.5) / n) if dur > 0 else 0.0
+        try:
+            f0 = frame_at(path, t)[y:y + h, x:x + w]
+            f1 = frame_at(path, t + 0.25)[y:y + h, x:x + w]
+        except Exception:
+            continue
+        if f0.size == 0 or f1.size == 0:
+            continue
+        if crops_out is not None:
+            crops_out.append(f0)
+        g0, g1 = a.prep(f0), a.prep(f1)
+        d = cv2.absdiff(g0, g1)
+        if (d > s.pixel_thresh).mean() > 0.05:
+            continue                     # slide flip / video playing: no use
+        (dx, dy), _ = cv2.phaseCorrelate(g0.astype(np.float32), g1.astype(np.float32), a.hann)
+        shifts.append(math.hypot(dx, dy))
+        noises.append(float(d[d <= s.pixel_thresh].mean()))
+    if len(shifts) < 3:
+        return False
+    return float(np.median(shifts)) >= 0.25 or float(np.median(noises)) >= 1.5
+
+
+def find_screen_quad(crops: Sequence[np.ndarray]) -> Optional[np.ndarray]:
+    """Corners of a projected screen filmed at an angle, inside the region.
+
+    ``crops``: a few BGR crops of the region taken over the video.  The
+    screen is the large bright four-sided area against the darker room.
+    Returns 4 corners (top-left, top-right, bottom-right, bottom-left) in
+    crop pixels, pushed out by a small margin so nothing is cut off, or None
+    when the screen is not clearly a tilted quadrilateral (then the plain
+    rectangle is used)."""
+    if not crops:
+        return None
+    sh = crops[0].shape
+    crops = [c for c in crops if c.shape == sh]
+    med = np.median(np.stack(crops[:15]), axis=0).astype(np.uint8)
+    g = cv2.cvtColor(med, cv2.COLOR_BGR2GRAY)
+    H, W = g.shape
+    f = 320.0 / W
+    gs = cv2.GaussianBlur(cv2.resize(g, (320, max(8, int(H * f))), interpolation=cv2.INTER_AREA), (5, 5), 0)
+    # the room: dark pixels connected to the region's border.  Everything
+    # else is the screen - including dark parts of the slide itself (a dark
+    # title bar, a black CT image), which a brightness threshold would cut.
+    edge = np.concatenate([gs[0], gs[-1], gs[:, 0], gs[:, -1]])
+    room = float(np.percentile(edge, 30))
+    screen_lvl = float(np.percentile(gs, 75))
+    if screen_lvl - room < 50:
+        return None                       # no bright screen in a dark room
+    thr = room + 0.15 * (screen_lvl - room)
+    dark = (gs < thr).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    border_labels = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))) - {0}
+    room_mask = np.isin(lab, list(border_labels)) & (dark > 0)
+    bw = (~room_mask).astype(np.uint8) * 255
+    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    c = max(cnts, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    if area < 0.4 * gs.shape[0] * gs.shape[1]:
+        return None
+    hull = cv2.convexHull(c)
+    if area < 0.9 * cv2.contourArea(hull):
+        return None                       # not a clean four-sided shape
+    peri = cv2.arcLength(hull, True)
+    quad = None
+    for eps in (0.01, 0.02, 0.03, 0.04, 0.06):
+        ap = cv2.approxPolyDP(hull, eps * peri, True)
+        if len(ap) == 4:
+            quad = ap.reshape(4, 2).astype(np.float32)
+            break
+    if quad is None:
+        return None
+    # order: top-left, top-right, bottom-right, bottom-left
+    sm, df = quad.sum(1), np.diff(quad, axis=1).ravel()
+    q = np.float32([quad[np.argmin(sm)], quad[np.argmin(df)], quad[np.argmax(sm)], quad[np.argmax(df)]])
+    if len({tuple(p) for p in q.tolist()}) < 4:
+        return None
+    q /= f
+    # a little margin outwards so the slide's edge is never cut
+    ctr = q.mean(0)
+    q = ctr + (q - ctr) * 1.035
+    q[:, 0] = np.clip(q[:, 0], 0, W - 1); q[:, 1] = np.clip(q[:, 1], 0, H - 1)
+    # only worth it when the screen is really tilted / not filling the box
+    box = np.float32([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]])
+    if np.abs(q - box).max(axis=1).max() < 0.03 * max(W, H):
+        return None
+    # safety: the slide must not change outside the corners.  Changes
+    # between the samples (slide flips) are the slide's content; if any
+    # noticeable part of them lies outside, the corners would cut the slide.
+    grays = [cv2.resize(cv2.cvtColor(c_, cv2.COLOR_BGR2GRAY), (gs.shape[1], gs.shape[0]),
+                        interpolation=cv2.INTER_AREA).astype(np.int16) for c_ in crops]
+    chg = np.zeros(gs.shape, np.float32)
+    for g0, g1 in zip(grays, grays[1:]):
+        chg += (np.abs(g0 - g1) > 40)
+    inside = np.zeros(gs.shape, np.uint8)
+    cv2.fillConvexPoly(inside, np.round(q * f).astype(np.int32), 1)
+    inside = cv2.dilate(inside, np.ones((5, 5), np.uint8))
+    total = float(chg.sum())
+    if total > 0 and float(chg[inside == 0].sum()) / total > 0.01:
+        return None
+    return q
+
+
 def detect_slides(
     path: str,
     roi: Rect,
@@ -501,6 +667,35 @@ def detect_slides(
     debug: Optional[Callable[[str], None]] = None,
 ) -> List[Capture]:
     s = settings or Settings()
+    warp = None
+    if s.stabilize is None:
+        import copy
+        s = copy.copy(s)
+        samples: list = []
+        s.stabilize = is_camera_video(path, roi, s, crops_out=samples)
+        if s.stabilize:
+            q = find_screen_quad(samples) if not excludes else None
+            if q is not None:
+                # filmed at an angle: straighten the screen into the region's
+                # rectangle (perspective correction) before anything else
+                rx, ry, rw, rh = roi
+                # output keeps the screen's own proportions
+                qw = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2.0
+                qh = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2.0
+                rh = max(16, int(round(rw * qh / max(1.0, qw))))
+                src = (q + np.float32([rx, ry])).astype(np.float32)
+                dst = np.float32([[0, 0], [rw - 1, 0], [rw - 1, rh - 1], [0, rh - 1]])
+                warp = cv2.getPerspectiveTransform(src, dst)
+                roi = (rx, ry, rw, rh)
+                if debug:
+                    debug("screen corners %s" % np.round(q).astype(int).tolist())
+        if s.stabilize:
+            # a filmed screen: rather miss a one- or two-letter change than
+            # fill the deck with near-duplicates (user's choice)
+            s.shift_tol = max(s.shift_tol, 2)
+            s.small_frac = max(s.small_frac, 0.0012)
+        if debug:
+            debug("camera video (shake handling): %s" % s.stabilize)
     a = _Analyzer(roi, excludes, s)
     x, y, w, h = roi
 
@@ -567,7 +762,11 @@ def detect_slides(
                 progress(min(1.0, t / duration), len(captures))
 
             img = frame.to_ndarray(format="bgr24")
-            crop = img[y:y + h, x:x + w]
+            if warp is not None:
+                crop = cv2.warpPerspective(img, warp, (w, h), flags=cv2.INTER_LINEAR,
+                                           borderMode=cv2.BORDER_REPLICATE)
+            else:
+                crop = img[y:y + h, x:x + w]
             if crop.size == 0:
                 raise ValueError("선택 영역이 영상 밖에 있습니다.")
             raw = a.prep(crop)

@@ -31,6 +31,9 @@ SCENARIOS = {
     "webcam_in_slide": dict(scale=1.0, crf=30, cam_inside=True, exclude_cam=False),
     "webcam_excluded": dict(scale=1.0, crf=30, cam_inside=True, exclude_cam=True),
     "keep_build_steps": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, collapse=False),
+    # camera filming the screen: jitter, wobble, exposure flicker, noise
+    "camera_shake": dict(scale=1.0, crf=30, cam_inside=False, exclude_cam=False, shake=3.0),
+    "camera_shake_strong": dict(scale=1.5, crf=34, cam_inside=False, exclude_cam=False, shake=6.0),
 }
 
 
@@ -42,7 +45,7 @@ def gray_small(img):
 def run(name, workdir):
     cfg = SCENARIOS[name]
     path = os.path.join(workdir, name + ".mp4")
-    roi, cam, segs = mtv.make(path, cfg["scale"], cfg["crf"], cfg["cam_inside"])
+    roi, cam, segs = mtv.make(path, cfg["scale"], cfg["crf"], cfg["cam_inside"], cfg.get("shake", 0.0))
     excludes = [cam] if cfg["exclude_cam"] else []
     st = Settings()
     st.collapse_builds = cfg.get("collapse", True)

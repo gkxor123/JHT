@@ -22,6 +22,11 @@ Design notes
   ignored until it has been still for a whole window.  Slide flips that
   change a large part of the region are not counted, so fast flipping still
   works.
+* Camera shake: lectures filmed with a camera jitter, wobble and change
+  exposure.  Every frame is aligned to the previous picture (phase
+  correlation) before it is analysed, and every comparison tolerates a
+  shift of a pixel or two and a global brightness / contrast change, so a
+  shaking camera is not taken for a new slide.
 * Duplicates (going back to an earlier slide) are skipped.
 * The saved image is the median of the stable frames (cursor removed).
 """
@@ -70,6 +75,9 @@ class Settings:
     dedupe: bool = True             # skip slides identical to an earlier one
     collapse_builds: bool = True    # text/figure build-up: keep only final step
     image_format: str = "jpg"       # jpg (smaller) or png (lossless)
+    stabilize: bool = True          # compensate camera shake / exposure drift
+    shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
+    max_shift: float = 0.04         # largest shake followed, part of the width
 
     @classmethod
     def preset(cls, name: str) -> "Settings":
@@ -276,6 +284,64 @@ class _Analyzer:
         self.block_kernel = np.ones((3, 3), np.uint8)
         self.ptr_templates: List[np.ndarray] = []
         self._tpl_i = 0
+        st = s.shift_tol if s.stabilize else 0
+        self.tol_kernel = (cv2.getStructuringElement(cv2.MORPH_RECT, (2 * st + 1, 2 * st + 1))
+                           if st > 0 else None)
+        self.hann = cv2.createHanningWindow((self.ww, self.wh), cv2.CV_32F)
+        ys, xs = np.nonzero(self.valid[::4, ::4])
+        self.sub = (ys * 4, xs * 4)
+
+    # ---- camera shake --------------------------------------------------
+    def shift_of(self, img: np.ndarray, ref: np.ndarray) -> Tuple[float, float]:
+        """Translation (dx, dy) that moves ``img`` onto ``ref``; (0, 0) when
+        the two pictures do not match (e.g. a different slide)."""
+        if not self.s.stabilize:
+            return 0.0, 0.0
+        (dx, dy), resp = cv2.phaseCorrelate(ref.astype(np.float32), img.astype(np.float32), self.hann)
+        lim = self.s.max_shift * self.ww
+        if resp < 0.05 or abs(dx) > lim or abs(dy) > lim:
+            return 0.0, 0.0
+        if abs(dx) < 0.25 and abs(dy) < 0.25:
+            return 0.0, 0.0
+        return -dx, -dy
+
+    @staticmethod
+    def shift(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
+        if dx == 0 and dy == 0:
+            return img
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        return cv2.warpAffine(img, M, (img.shape[1], img.shape[0]),
+                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+    def align(self, img: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        dx, dy = self.shift_of(img, ref)
+        return self.shift(img, dx, dy)
+
+    def _match_exposure(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """``b`` with brightness / contrast matched to ``a`` (auto exposure
+        of a camera).  Fitted on pixels that agree, so new content on the
+        slide does not disturb the fit."""
+        ys, xs = self.sub
+        if len(ys) < 50:
+            return b
+        va = a[ys, xs].astype(np.float32)
+        vb = b[ys, xs].astype(np.float32)
+        g, o = 1.0, float(np.median(va - vb))
+        for _ in range(2):
+            use = np.abs(va - (g * vb + o)) < 20
+            if use.sum() < 0.3 * len(va):
+                break
+            A = np.stack([vb[use], np.ones(int(use.sum()), np.float32)], 1)
+            (g, o), *_ = np.linalg.lstsq(A, va[use], rcond=None)
+            g = float(np.clip(g, 0.8, 1.25)); o = float(np.clip(o, -40, 40))
+        if abs(g - 1.0) < 0.01 and abs(o) < 2.0:
+            return b
+        return cv2.convertScaleAbs(b, alpha=g, beta=o)
+
+    def diff_aligned(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """``diff`` after moving ``b`` onto ``a`` (pictures taken far apart in
+        time, when the camera may have drifted)."""
+        return self.diff(a, self.align(b, a))
 
     def add_pointer_template(self, patch: np.ndarray) -> None:
         """Remember what the pointer looks like, at full resolution.
@@ -357,8 +423,21 @@ class _Analyzer:
         return cv2.GaussianBlur(g, (3, 3), 0)
 
     def diff(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        d = cv2.absdiff(a, b)
-        return ((d > self.s.pixel_thresh) & (self.valid > 0)).astype(np.uint8)
+        t = self.s.pixel_thresh
+        if not self.s.stabilize:
+            d = cv2.absdiff(a, b)
+            return ((d > t) & (self.valid > 0)).astype(np.uint8)
+        b = self._match_exposure(a, b)
+        d = cv2.absdiff(a, b) > t
+        if d.any() and self.tol_kernel is not None:
+            # a pixel changed only if no pixel close by in the other picture
+            # looks like it (edges moved by a shaking camera are not change)
+            k = self.tol_kernel
+            ai, bi = a.astype(np.int16), b.astype(np.int16)
+            bmax, bmin = cv2.dilate(b, k).astype(np.int16), cv2.erode(b, k).astype(np.int16)
+            amax, amin = cv2.dilate(a, k).astype(np.int16), cv2.erode(a, k).astype(np.int16)
+            d &= ((ai > bmax + t) | (ai < bmin - t) | (bi > amax + t) | (bi < amin - t))
+        return (d & (self.valid > 0)).astype(np.uint8)
 
     def blobs(self, mask: np.ndarray) -> np.ndarray:
         """Connected components (after dilation) as rows of x, y, w, h, area."""
@@ -488,6 +567,12 @@ def detect_slides(
             if crop.size == 0:
                 raise ValueError("선택 영역이 영상 밖에 있습니다.")
             raw = a.prep(crop)
+            if s.stabilize and cleans:
+                dx, dy = a.shift_of(raw, cleans[-1])
+                if dx or dy:
+                    raw = a.shift(raw, dx, dy)
+                    crop = a.shift(crop, dx * crop.shape[1] / float(a.ww),
+                                   dy * crop.shape[0] / float(a.wh))
             raws.append(raw)
             crops.append(crop)
             clean = _median3(*raws) if len(raws) == 3 else raw
@@ -653,11 +738,11 @@ def detect_slides(
                     run_frames.append((t, raw, crop.copy()))
 
             if stable >= s.stable_samples and active is None:
-                if ref is None or chg(a.diff(clean, ref) & keep, ref_near):
+                if ref is None or chg(a.diff_aligned(clean, ref) & keep, ref_near):
                     dup = False
                     if s.dedupe:
                         for c in captures:
-                            if not chg(a.diff(clean, c.small) & keep, c.near):
+                            if not chg(a.diff_aligned(clean, c.small) & keep, c.near):
                                 dup = True
                                 break
                     ref, ref_near = clean, near_now.copy()
@@ -680,8 +765,8 @@ def detect_slides(
                     run_frames.clear()
         # end of video: the last slide may have been shown only briefly
         if (active is None and run_frames and stable >= 1 and
-                (ref is None or chg(a.diff(clean, ref) & keep, ref_near))):
-            dup = s.dedupe and any(not chg(a.diff(clean, c.small) & keep, c.near)
+                (ref is None or chg(a.diff_aligned(clean, ref) & keep, ref_near))):
+            dup = s.dedupe and any(not chg(a.diff_aligned(clean, c.small) & keep, c.near)
                                    for c in captures)
             if not dup:
                 good = [(ft, cr) for ft, rs, cr in run_frames
@@ -728,7 +813,7 @@ def _relation(p: Capture, c: Capture, a: _Analyzer, sig) -> Tuple[str, bool]:
     dyn_any = None   # moving content seen in either capture
     if p.dyn is not None or c.dyn is not None:
         dyn_any = (p.dyn if p.dyn is not None else 0) | (c.dyn if c.dyn is not None else 0)
-    m = a.diff(p.small, c.small) & (1 - excl)
+    m = a.diff_aligned(p.small, c.small) & (1 - excl)
     if not m.any():
         return "pointer", False
     md = cv2.dilate(m, a.kernel)
@@ -864,7 +949,7 @@ def _learn_pointer_from_captures(caps: List[Capture], a: _Analyzer, sig, debug=N
         pw, ph = sig[0], sig[1]
     items = []   # (descriptor, centre, capture index, box)
     for i in range(1, len(caps)):
-        m = a.diff(caps[i - 1].small, caps[i].small)
+        m = a.diff_aligned(caps[i - 1].small, caps[i].small)
         if m.mean() > 0.01:
             continue                       # a real slide change, not a cursor move
         md = cv2.dilate(m, a.kernel)

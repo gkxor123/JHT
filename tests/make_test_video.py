@@ -149,7 +149,11 @@ def cursor_pos(t):
     return cx, cy
 
 
-def make(out, scale=1.0, crf=30, cam_inside=False):
+def make(out, scale=1.0, crf=30, cam_inside=False, shake=0.0):
+    """``shake`` > 0 simulates a hand-held / tripod camera filming the
+    screen: the whole picture jitters by up to ``shake`` pixels (with an
+    occasional bump twice as large), slight zoom/rotation wobble, the
+    exposure drifts and flickers, and there is sensor noise."""
     W, H = int(1280 * scale) // 2 * 2, int(720 * scale) // 2 * 2
     sc = scale
     roi = tuple(int(round(v * sc)) for v in (RX, RY, RW, RH))
@@ -168,6 +172,8 @@ def make(out, scale=1.0, crf=30, cam_inside=False):
     t0 = 0.0
     prev_slide = None
     fidx = 0
+    srng = np.random.default_rng(11)
+    jx = jy = 0.0
     for dur, slide, dynf, dbox, exp in TIMELINE:
         segments.append(dict(start=t0, end=t0 + dur, slide=slide, expect=exp, dynamic=dbox))
         n = int(dur * FPS)
@@ -193,6 +199,23 @@ def make(out, scale=1.0, crf=30, cam_inside=False):
             if int(t) % 7 < 3 and t < 81:   # laser pointer
                 lx = RX + 300 + 200 * np.cos(t * 1.7); ly = RY + 300 + 120 * np.sin(t * 2.1)
                 cv2.circle(frame, (int(lx * sc), int(ly * sc)), int(7 * sc), (0, 0, 255), -1)
+            if shake > 0:
+                # smooth random walk pulled back to the centre, plus bumps
+                jx = 0.85 * jx + srng.normal(0, shake * 0.35)
+                jy = 0.85 * jy + srng.normal(0, shake * 0.35)
+                bump = srng.random() < 0.01
+                dx = float(np.clip(jx, -shake, shake)) * (2 if bump else 1)
+                dy = float(np.clip(jy, -shake, shake)) * (2 if bump else 1)
+                ang = 0.15 * np.sin(t * 0.9) + srng.normal(0, 0.03)
+                zm = 1.0 + 0.002 * np.sin(t * 0.4)
+                M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), ang, zm)
+                M[0, 2] += dx * sc; M[1, 2] += dy * sc
+                frame = cv2.warpAffine(frame, M, (W, H), flags=cv2.INTER_LINEAR,
+                                       borderMode=cv2.BORDER_REPLICATE)
+                gain = 1.0 + 0.06 * np.sin(t * 0.5) + srng.normal(0, 0.01)
+                off = 8 * np.sin(t * 0.23) + srng.normal(0, 1.5)
+                noise = srng.normal(0, 3.0, frame.shape)
+                frame = np.clip(frame.astype(np.float32) * gain + off + noise, 0, 255).astype(np.uint8)
             vf = av.VideoFrame.from_ndarray(frame, format="bgr24")
             for p in st.encode(vf):
                 container.mux(p)

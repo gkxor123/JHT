@@ -77,7 +77,7 @@ class Settings:
     image_format: str = "jpg"       # jpg (smaller) or png (lossless)
     stabilize: bool = True          # compensate camera shake / exposure drift
     shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
-    max_shift: float = 0.04         # largest shake followed, part of the width
+    max_shift: float = 0.015        # largest shake followed, part of the width
 
     @classmethod
     def preset(cls, name: str) -> "Settings":
@@ -301,7 +301,9 @@ class _Analyzer:
         lim = self.s.max_shift * self.ww
         if resp < 0.05 or abs(dx) > lim or abs(dy) > lim:
             return 0.0, 0.0
-        if abs(dx) < 0.25 and abs(dy) < 0.25:
+        if abs(dx) < 0.75 and abs(dy) < 0.75:
+            # sub-pixel: left to the shift-tolerant diff.  Following tiny
+            # (often biased) estimates would let the picture creep away.
             return 0.0, 0.0
         return -dx, -dy
 
@@ -327,10 +329,12 @@ class _Analyzer:
         va = a[ys, xs].astype(np.float32)
         vb = b[ys, xs].astype(np.float32)
         g, o = 1.0, float(np.median(va - vb))
+        if abs(o) > 40:
+            return b            # mostly different pictures: nothing to match
         for _ in range(2):
             use = np.abs(va - (g * vb + o)) < 20
             if use.sum() < 0.3 * len(va):
-                break
+                return b        # too little in common (moving video, new slide)
             A = np.stack([vb[use], np.ones(int(use.sum()), np.float32)], 1)
             (g, o), *_ = np.linalg.lstsq(A, va[use], rcond=None)
             g = float(np.clip(g, 0.8, 1.25)); o = float(np.clip(o, -40, 40))

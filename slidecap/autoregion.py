@@ -75,7 +75,9 @@ def detect_region(frames: Sequence[np.ndarray]) -> Tuple[Optional[Rect], str, st
     of (nearly) all sampled slide flips: a slide that uses the edges only
     now and then must not be cut (a slightly wider region costs nothing)."""
     roi, conf, why = _detect_region(frames)
-    if roi is not None:
+    if roi is not None and why != "projector screen":
+        # (a projector screen has a clear physical edge: widening it by
+        # changes would only reach into the moving audience)
         st = np.stack([f.astype(np.int16) for f in frames])
         D = np.abs(np.diff(st, axis=0)) > DIFF
         roi = _cover_flips(D, roi)
@@ -314,7 +316,9 @@ def _bright_screen(med: np.ndarray, ch: np.ndarray, core) -> Optional[Rect]:
     room = float(np.percentile(small, 10))
     if screen - room < 30:
         return None
-    thr = (screen + room) / 2.0
+    # well below the slide's white: a dark title bar is still part of the
+    # screen, and the room is much darker than any projected colour
+    thr = room + 0.3 * (screen - room)
     bright = small > thr
     comps, lab = _components(bright)
     if not comps:
@@ -330,15 +334,21 @@ def _bright_screen(med: np.ndarray, ch: np.ndarray, core) -> Optional[Rect]:
     contrast = float(np.median(inner) - np.median(outer)) if outer.size else 0.0
     area = box_area / float(small.shape[0] * small.shape[1])
     aspect = (x1 - x0) / float(max(1, y1 - y0))
-    if area < 0.15 or inside_mass < 0.85 or fill < 0.7 or contrast < 35 or not 1.1 <= aspect <= 2.5:
+    # a big, clearly lit, well filled rectangle in a dark hall is the screen
+    # even when the audience moves outside it (they change a lot too)
+    obvious = contrast >= 100 and fill >= 0.85 and area >= 0.15 and 1.1 <= aspect <= 2.5
+    if not obvious and (area < 0.15 or inside_mass < 0.85 or fill < 0.7 or contrast < 35
+                        or not 1.1 <= aspect <= 2.5):
         return None
-    pad = 1                                    # one small pixel of margin each side
+    # a little margin each side (about 2%) so the slide's edge is never cut
+    pad = max(1, int(round(0.02 * max(x1 - x0, y1 - y0))))
     x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
     x1, y1 = min(small.shape[1], x1 + pad), min(small.shape[0], y1 + pad)
     X0, Y0, X1, Y1 = x0 * f, y0 * f, x1 * f, y1 * f
     # keep it near the block of slide changes: a bright banner or stage light
     # touching the screen is cut off (a tilted screen's corners stay inside)
-    mx, my = int(0.08 * (cx1 - cx0) * f), int(0.08 * (cy1 - cy0) * f)
+    k = 0.15 if obvious else 0.08         # the title bar often changes little
+    mx, my = int(k * (cx1 - cx0) * f), int(k * (cy1 - cy0) * f)
     X0, Y0 = max(X0, cx0 * f - mx), max(Y0, cy0 * f - my)
     X1, Y1 = min(X1, cx1 * f + mx), min(Y1, cy1 * f + my)
     if X1 - X0 < 8 or Y1 - Y0 < 8:

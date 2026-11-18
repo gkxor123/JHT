@@ -79,6 +79,7 @@ class Settings:
     shift_tol: int = 1              # px (analysis res.) a pixel may move unnoticed
     max_shift: float = 0.015        # largest shake followed, part of the width
     cam_same_frac: float = 0.003    # camera video: captures whose changed area (blobs) is smaller are one slide
+    cam_same_pixels: float = 0.02   # ... or whose changed pixels are fewer
 
     @classmethod
     def preset(cls, name: str) -> "Settings":
@@ -291,6 +292,8 @@ class _Analyzer:
         self.block_kernel = np.ones((3, 3), np.uint8)
         self.ptr_templates: List[np.ndarray] = []
         self._tpl_i = 0
+        self.motion_log: list = []       # camera video: (time, packed block mask) of still steps
+        self.audience = None
         st = s.shift_tol if s.stabilize else 0
         self.tol_kernel = (cv2.getStructuringElement(cv2.MORPH_RECT, (2 * st + 1, 2 * st + 1))
                            if st > 0 else None)
@@ -832,6 +835,9 @@ def detect_slides(
     frame_idx = 0
     last_report = -10.0
     sample_idx = 0
+    # camera video: where things move while the slide stays (the audience)
+    still_motion = np.zeros((a.wh, a.ww), np.float32)
+    still_n = 0
 
     try:
         for frame in _frames(container, stream):
@@ -877,6 +883,13 @@ def detect_slides(
             # changes much larger than a pointer (fast GIF objects / video,
             # which the median removes just like a cursor)
             motion = a.diff(clean, clean_prev)
+            if s.stabilize and len(raws) >= 2:
+                rm = a.diff(raw, raws[-2])
+                if rm.mean() < 0.03:            # no slide flip in this step
+                    still_motion += rm
+                    still_n += 1
+                    blk = cv2.resize(rm.astype(np.float32), (a.bw, a.bh), interpolation=cv2.INTER_AREA) > 0.02
+                    a.motion_log.append((t, np.packbits(blk)))
             T = a.diff(raw, clean)
             # a change covering much of the slide is a flip, not animation
             bm = a.to_blocks(motion) if motion.mean() < s.global_frac else \
@@ -1076,6 +1089,10 @@ def detect_slides(
     sig = None
     if ptr_sigs:
         sig = tuple(np.percentile(np.array([v for _, v in ptr_sigs]), 75, axis=0))
+    if s.stabilize and still_n >= 20:
+        a.audience = _audience_zone(still_motion / still_n, a)
+        if debug and a.audience is not None:
+            debug("audience zone %.1f%% of the region" % (a.audience.mean() * 100))
     captures = merge_captures(captures, a, s, sig, debug)
     if progress:
         progress(1.0, len(captures))
@@ -1308,7 +1325,9 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
     oc_p, oc_c = a.occluders(p.small), a.occluders(c.small)
     hid_p = 0.0 if oc_p is None else float(oc_p.mean())
     hid_c = 0.0 if oc_c is None else float(oc_c.mean())
-    keep_c = hid_c <= hid_p              # a tie: the later one (last build step)
+    # the later picture, unless it is clearly more hidden by the audience:
+    # an added arrow / line / label is then kept (the later one has it)
+    keep_c = hid_c <= hid_p + 0.02
     m = a.diff_aligned(p.small, c.small)
     if m.mean() > s.cam_same_frac:
         # the camera may have panned / zoomed a lot between the two: try
@@ -1321,6 +1340,12 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
                 m = m2
     if p.dyn is not None and c.dyn is not None:
         m &= (1 - (p.dyn & c.dyn))      # only what moves in both (same GIF)
+    aud = getattr(a, "audience", None)
+    if aud is not None:
+        m &= (1 - aud)                   # where the audience moves all along
+    near = _moving_between(a, p.time, c.time)
+    if near is not None:
+        m &= (1 - near)                  # where people moved in the meantime
     if not m.any():
         return True, keep_c
     md = cv2.dilate(m, a.kernel)
@@ -1335,6 +1360,12 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
             continue
         if _edge_strip(a, x, y, w, h):
             continue                     # the screen's border moving with the camera
+        if (y + h >= a.wh - max(3, int(a.wh * 0.03)) and y >= a.wh * 0.5
+                and w <= a.ww * 0.6):
+            # rising from the lower edge, staying in the lower half: the
+            # audience (heads) in front of the screen, dark or lit.  A slide
+            # change reaches higher / wider than this.
+            continue
         compact = max(w, h) <= 2.0 * min(w, h)
         if area <= ptr_area * 1.2 and compact:
             spots.append(float(area))
@@ -1346,7 +1377,61 @@ def _camera_same(p: Capture, c: Capture, a: _Analyzer, s: Settings) -> Tuple[boo
     # it is now, a laser dot.  More: small marks drawn on the slide.
     if len(spots) > 3:
         content += sum(spots)
-    return content / a.total < s.cam_same_frac, keep_c
+    if content / a.total < s.cam_same_frac:
+        return True, keep_c
+    # little changed pixels in all (people, a camera zoom that alignment
+    # could not fully undo, an added arrow): the same slide.  A new slide or
+    # a replaced picture changes far more (10-50 %).  The later picture is
+    # kept, so an added mark is not lost.
+    return float(m.sum()) / a.total < s.cam_same_pixels, keep_c
+
+
+def _moving_between(a: "_Analyzer", t0: float, t1: float) -> Optional[np.ndarray]:
+    """Blocks that kept moving between times t0 and t1 while the slide
+    stayed (people in front of the screen at that moment)."""
+    if not a.motion_log:
+        return None
+    lo, hi = min(t0, t1) - 2.0, max(t0, t1) + 4.0
+    n = a.bw * a.bh
+    acc = None
+    cnt = 0
+    for t, bits in a.motion_log:
+        if lo <= t <= hi:
+            m = np.unpackbits(bits)[:n].reshape(a.bh, a.bw).astype(np.float32)
+            acc = m if acc is None else acc + m
+            cnt += 1
+    if cnt < 8:
+        return None
+    zone = ((acc / cnt) > 0.08).astype(np.uint8)
+    nlab, lab, st, _ = cv2.connectedComponentsWithStats(cv2.dilate(zone, np.ones((3, 3), np.uint8)), connectivity=8)
+    out = np.zeros_like(zone)
+    for i in range(1, nlab):
+        if st[i, cv2.CC_STAT_AREA] >= 12:            # thin cursor / laser traces left out
+            out[lab == i] = 1
+    if not out.any() or out.mean() > 0.4:
+        return None
+    full = cv2.resize(out, (a.ww, a.wh), interpolation=cv2.INTER_NEAREST)
+    return cv2.dilate(full, a.kernel, iterations=2)
+
+
+def _audience_zone(freq: np.ndarray, a: "_Analyzer") -> Optional[np.ndarray]:
+    """Areas that keep changing while the slide itself stays the same:
+    heads and hands of the audience, a lecturer walking in front.  Thin
+    traces (cursor, laser dot) are left out: only sizable areas count."""
+    k = max(5, a.ww // 40) | 1
+    f = cv2.blur(freq, (k, k))
+    zone = (f > 0.015).astype(np.uint8)
+    if not zone.any():
+        return None
+    zone = cv2.morphologyEx(zone, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(zone, connectivity=8)
+    out = np.zeros_like(zone)
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] >= 0.004 * a.total:
+            out[lab == i] = 1
+    if not out.any() or out.mean() > 0.35:
+        return None              # nothing, or too much to be people
+    return cv2.dilate(out, a.kernel, iterations=2)
 
 
 def merge_captures(caps: List[Capture], a: _Analyzer, s: Settings, sig,

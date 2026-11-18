@@ -36,14 +36,16 @@ def answers():
                 continue
             m = re.match(r"(.+?)\s*:\s*(\d+)", line)
             if m:
-                key = os.path.splitext(m.group(1).strip())[0]
+                key = m.group(1).strip()
+                if os.path.splitext(key)[1].lower() in (".mp4", ".mov", ".avi", ".mkv"):
+                    key = os.path.splitext(key)[0]   # "1_3. Orbit_01" has a dot but no extension
                 out[key] = int(m.group(2))
     return out
 
 
 def find_answer(ans, clip):
     base = os.path.splitext(os.path.basename(clip))[0]
-    for k, v in ans.items():
+    for k, v in sorted(ans.items(), key=lambda kv: -len(kv[0])):   # longest name first
         if base == k or base.startswith(k):
             return v
     return None
